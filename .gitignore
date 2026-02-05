@@ -5,3 +5,4 @@ dist
 .ragmail-cache
 .tgz
 *.tar.gz
+tmp
