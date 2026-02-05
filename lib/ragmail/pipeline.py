@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 
 from ragmail.clean.cleaner import process_mbox
-from ragmail.common.terminal import Colors
+from ragmail.common.terminal import Colors, format_time, format_bytes
 from ragmail.split.splitter import MboxSplitter
 from ragmail.workspace import Workspace, default_cache_root, get_workspace
 from ragmail.mbox_index import build_mbox_index, MboxIndexWriter
@@ -40,6 +40,12 @@ def run_pipeline(
     stages: set[str] | None = None,
 ) -> Workspace:
     ws = get_workspace(workspace_name, base_dir=base_dir)
+    workspace_exists = ws.root.exists() and any(ws.root.iterdir())
+    if workspace_exists and not resume:
+        raise RuntimeError(
+            f"Workspace already exists at {ws.root}. "
+            "Use --resume to continue or choose a new workspace."
+        )
     ws.ensure()
     ws.apply_env(cache_dir=cache_dir, base_dir=base_dir)
     cache_root = cache_dir or default_cache_root(base_dir)
@@ -65,6 +71,7 @@ def run_pipeline(
     if refresh and _selected("ingest"):
         skip_exists_effective = True
 
+    pipeline_start = time.monotonic()
     _print_header(
         ws=ws,
         inputs=inputs,
@@ -105,7 +112,7 @@ def run_pipeline(
             raise
         else:
             stage_display.update_progress("download", processed=1)
-            stage_display.update("download", "done")
+            stage_display.update("download", "done", duration_s=time.monotonic() - download_start)
             ws.update_stage("download", "done", {"duration_s": time.monotonic() - download_start})
             _log_event(
                 ws,
@@ -117,15 +124,42 @@ def run_pipeline(
         stage_display.update("download", "skipped")
         _log_event(ws, "download", "INFO", "skipped (not selected)")
 
+    existing_split_files = sorted(
+        ws.split_dir.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9].mbox")
+    )
+    split_outputs_exist = bool(existing_split_files)
+    if resume_effective and _selected("split") and ws.stage_done("split") and not split_outputs_exist:
+        _log_event(
+            ws,
+            "split",
+            "WARN",
+            "stage marked done but outputs missing; rerunning split",
+        )
     split_total = 0
     split_errors = 0
-    if _selected("split") and (not resume_effective or not ws.stage_done("split")):
+    split_should_run = _selected("split") and (
+        (not resume_effective)
+        or (not ws.stage_done("split"))
+        or (not split_outputs_exist)
+    )
+    if split_should_run:
         split_start = time.monotonic()
         _log_event(ws, "split", "INFO", "start")
         stage_display.update("split", "running")
-        split_total = _count_mbox_messages(inputs)
-        stage_display.set_total("split", split_total)
+        split_total_bytes = sum(p.stat().st_size for p in inputs)
+        split_existing = 0
+        if resume_effective and split_outputs_exist:
+            split_existing = _count_mbox_messages(existing_split_files)
+        split_bytes_processed = 0
         ws.update_stage("split", "running", {"inputs": [str(p) for p in inputs]})
+        stage_display.update_progress(
+            "split",
+            processed=split_existing,
+            meta={
+                "bytes_processed": split_bytes_processed,
+                "bytes_total": split_total_bytes,
+            },
+        )
         try:
             with _stage_log(ws, "split"):
                 split_processed = 0
@@ -137,20 +171,33 @@ def run_pipeline(
                     base_processed = split_processed
                     base_skipped = split_skipped
 
-                    def _split_progress(payload, *, _base=base_processed, _base_skip=base_skipped):
-                        nonlocal split_processed, split_skipped
-                        split_processed = _base + payload["processed"]
+                    input_size = input_mbox.stat().st_size
+                    base_bytes = split_bytes_processed
+
+                    def _split_progress(
+                        payload,
+                        *,
+                        _base=base_processed,
+                        _base_skip=base_skipped,
+                        _base_bytes=base_bytes,
+                    ):
+                        nonlocal split_processed, split_skipped, split_bytes_processed
+                        split_processed = split_existing + _base + payload["processed"]
                         split_skipped = _base_skip + payload["skipped"]
+                        split_bytes_processed = _base_bytes + payload.get("position", 0)
                         stage_display.update_progress(
                             "split",
                             processed=split_processed,
                             skipped=split_skipped,
+                            meta={
+                                "bytes_processed": split_bytes_processed,
+                                "bytes_total": split_total_bytes,
+                            },
                         )
                         _log_progress(
                             ws,
                             "split",
                             split_processed,
-                            total=split_total,
                             skipped=split_skipped,
                         )
 
@@ -161,16 +208,22 @@ def run_pipeline(
                         progress_callback=_split_progress,
                         show_progress=False,
                     )
-                    splitter.run(resume=resume)
+                    split_resume = resume_effective and split_outputs_exist
+                    splitter.run(resume=split_resume)
                     split_processed = base_processed + splitter.processed_emails
                     split_skipped = base_skipped + splitter.skipped_emails
                     split_written += splitter.written_emails
                     split_errors += splitter.error_emails
+                    split_bytes_processed = base_bytes + input_size
 
                 stage_display.update_progress(
                     "split",
-                    processed=split_processed,
+                    processed=split_existing + split_processed,
                     skipped=split_skipped,
+                    meta={
+                        "bytes_processed": split_bytes_processed,
+                        "bytes_total": split_total_bytes,
+                    },
                 )
         except Exception:
             stage_display.update("split", "failed")
@@ -189,7 +242,7 @@ def run_pipeline(
                     "duration_s": time.monotonic() - split_start,
                 },
             )
-            stage_display.update("split", "done")
+            stage_display.update("split", "done", duration_s=time.monotonic() - split_start)
             _log_event(
                 ws,
                 "split",
@@ -209,10 +262,24 @@ def run_pipeline(
         _log_event(ws, "split", "ERROR", "no split outputs found")
         raise RuntimeError(
             f"No split MBOX files found in {ws.split_dir}. "
-            "Run the split stage or provide input MBOX files."
+            "Provide input MBOX files or run `ragmail pipeline <mbox> --workspace <name>`. "
+            "If the workspace was moved or split outputs were deleted, rerun "
+            "`ragmail pipeline <mbox> --workspace <name> --stages split` (or `--refresh`)."
         )
 
-    clean_should_run = _selected("clean") and (not resume_effective or not ws.stage_done("clean"))
+    expected_clean = {ws.clean_dir / f"{mbox.stem}.clean.jsonl" for mbox in split_files}
+    existing_clean = set(ws.clean_dir.glob("*.clean.jsonl"))
+    missing_clean = bool(expected_clean and not expected_clean.issubset(existing_clean))
+    if resume_effective and _selected("clean") and ws.stage_done("clean") and missing_clean:
+        _log_event(
+            ws,
+            "clean",
+            "WARN",
+            "stage marked done but outputs missing; rerunning clean (resume)",
+        )
+    clean_should_run = _selected("clean") and (
+        (not resume_effective) or (not ws.stage_done("clean")) or missing_clean
+    )
     index_in_clean = clean_should_run
 
     clean_total = 0
@@ -223,10 +290,18 @@ def run_pipeline(
         ws.update_stage("index", "running", {"split_dir": str(ws.split_dir), "via": "clean"})
         _log_event(ws, "index", "INFO", "start (via clean)")
 
+    index_outputs_exist = (ws.split_dir / "mbox_index.jsonl").exists()
+    if resume_effective and _selected("index") and ws.stage_done("index") and not index_outputs_exist:
+        _log_event(
+            ws,
+            "index",
+            "WARN",
+            "stage marked done but outputs missing; rerunning index",
+        )
     index_should_run = (
         _selected("index")
         and not index_in_clean
-        and (not resume_effective or not ws.stage_done("index"))
+        and ((not resume_effective) or (not ws.stage_done("index")) or (not index_outputs_exist))
     )
 
     if index_should_run:
@@ -272,7 +347,7 @@ def run_pipeline(
                     "duration_s": time.monotonic() - index_start,
                 },
             )
-            stage_display.update("index", "done")
+            stage_display.update("index", "done", duration_s=time.monotonic() - index_start)
             _log_event(
                 ws,
                 "index",
@@ -304,7 +379,8 @@ def run_pipeline(
                 if existing_clean:
                     raise RuntimeError(
                         f"Index missing at {index_path}. "
-                        "Run `ragmail pipeline --stages index` to rebuild."
+                        "Run `ragmail pipeline --stages clean --workspace <name>` to rebuild "
+                        "(or `--stages index` for index-only)."
                     )
             index_mode = "a" if (resume_effective and index_path.exists()) else "w"
             index_writer = MboxIndexWriter(index_path, mode=index_mode)
@@ -321,9 +397,20 @@ def run_pipeline(
                     link_path = _ensure_link_unique(ws.clean_dir, mbox)
                     base_processed = clean_processed
                     base_skipped = clean_skipped
+                    base_spam = clean_spam
+                    base_errors = clean_errors
 
-                    def _clean_progress(payload, *, _base=base_processed, _base_skip=base_skipped):
+                    def _clean_progress(
+                        payload,
+                        *,
+                        _base=base_processed,
+                        _base_skip=base_skipped,
+                        _base_spam=base_spam,
+                        _base_errors=base_errors,
+                    ):
                         nonlocal clean_processed, clean_skipped
+                        spam_total = _base_spam + payload.get("spam", 0)
+                        error_total = _base_errors + payload.get("errors", 0)
                         clean_processed = _base + payload["processed"]
                         clean_skipped = _base_skip + payload["skipped"]
                         stage_display.update_progress(
@@ -331,8 +418,8 @@ def run_pipeline(
                             processed=clean_processed,
                             skipped=clean_skipped,
                             meta={
-                                "spam": payload.get("spam", 0),
-                                "errors": payload.get("errors", 0),
+                                "spam": spam_total,
+                                "errors": error_total,
                             },
                         )
                         if index_in_clean:
@@ -343,8 +430,8 @@ def run_pipeline(
                             clean_processed,
                             total=clean_total,
                             skipped=clean_skipped,
-                            spam=payload.get("spam", 0),
-                            errors=payload.get("errors", 0),
+                            spam=spam_total,
+                            errors=error_total,
                         )
 
                     stats = process_mbox(
@@ -405,7 +492,7 @@ def run_pipeline(
                     "duration_s": time.monotonic() - clean_start,
                 },
             )
-            stage_display.update("clean", "done")
+            stage_display.update("clean", "done", duration_s=time.monotonic() - clean_start)
             _log_event(
                 ws,
                 "clean",
@@ -423,7 +510,7 @@ def run_pipeline(
                         "via": "clean",
                     },
                 )
-                stage_display.update("index", "done")
+                stage_display.update("index", "done", duration_s=time.monotonic() - clean_start)
         finally:
             if index_writer is not None:
                 index_writer.close()
@@ -436,12 +523,17 @@ def run_pipeline(
             _log_event(ws, "clean", "INFO", "skipped (not selected)")
 
     clean_root = clean_dir or ws.clean_dir
-    clean_files = sorted(clean_root.glob("*.clean.jsonl"))
+    if split_files and clean_root == ws.clean_dir:
+        expected_clean = {clean_root / f"{mbox.stem}.clean.jsonl" for mbox in split_files}
+        clean_files = sorted(path for path in expected_clean if path.exists())
+    else:
+        clean_files = sorted(clean_root.glob("*.clean.jsonl"))
     if (_selected("vectorize") or _selected("ingest")) and not clean_files:
         _log_event(ws, "clean", "ERROR", "no clean outputs found")
         raise RuntimeError(
             f"No clean JSONL files found in {clean_root}. "
-            "Run the clean stage or provide input MBOX files."
+            "Run `ragmail pipeline <mbox> --workspace <name> --stages clean` "
+            "or rerun from split+clean with the original inputs."
         )
 
     if embeddings_dir is not None:
@@ -512,7 +604,7 @@ def run_pipeline(
                     "duration_s": time.monotonic() - vectorize_start,
                 },
             )
-            stage_display.update("vectorize", "done")
+            stage_display.update("vectorize", "done", duration_s=time.monotonic() - vectorize_start)
             _log_event(
                 ws,
                 "vectorize",
@@ -683,7 +775,7 @@ def run_pipeline(
                     "duration_s": time.monotonic() - ingest_start,
                 },
             )
-            stage_display.update("ingest", "done")
+            stage_display.update("ingest", "done", duration_s=time.monotonic() - ingest_start)
             _log_event(
                 ws,
                 "ingest",
@@ -720,6 +812,7 @@ def run_pipeline(
         ingest_total=ingest_total,
         ingest_count=ingest_count,
         ingest_errors=ingest_errors,
+        total_duration_s=time.monotonic() - pipeline_start,
     )
 
     return ws
@@ -859,8 +952,10 @@ class _StageDisplay:
             stage: {"processed": 0, "total": None, "skipped": 0, "meta": {}}
             for stage in stages
         }
+        self._durations: dict[str, float] = {}
         self._stage_width = max((len(stage) for stage in stages), default=8)
         self._status_width = max((len(status) for status in self._status.values()), default=7)
+        self._duration_width = 0
         self._lines_printed = 0
         self._note = ""
         self._spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -873,10 +968,13 @@ class _StageDisplay:
         import sys
         self._out = sys.__stdout__ or sys.stdout
 
-    def update(self, stage: str, status: str) -> None:
+    def update(self, stage: str, status: str, duration_s: float | None = None) -> None:
         with self._lock:
             self._status[stage] = status
             self._status_width = max(self._status_width, len(status))
+            if duration_s is not None:
+                self._durations[stage] = duration_s
+                self._duration_width = max(self._duration_width, len(format_time(duration_s)))
         self.render(force=True)
 
     def note(self, message: str) -> None:
@@ -937,6 +1035,18 @@ class _StageDisplay:
                     progress_text = "0/0 (100.0%)"
                 else:
                     progress_text = f"{processed:,}"
+                if stage == "split" and meta.get("bytes_total") is not None:
+                    bytes_total = max(0, int(meta.get("bytes_total", 0)))
+                    bytes_processed = max(0, int(meta.get("bytes_processed", 0)))
+                    if bytes_total:
+                        bytes_pct = bytes_processed / bytes_total * 100
+                        bytes_text = (
+                            f"{format_bytes(bytes_processed)}/{format_bytes(bytes_total)} "
+                            f"({bytes_pct:5.1f}%)"
+                        )
+                    else:
+                        bytes_text = format_bytes(bytes_processed)
+                    progress_text = f"{processed:,} emails  {bytes_text}"
                 if stage == "clean" and (meta.get("spam") is not None or meta.get("errors") is not None):
                     bulk = meta.get("spam", 0)
                     errors = meta.get("errors", 0)
@@ -950,9 +1060,13 @@ class _StageDisplay:
                         )
                 elif skipped:
                     progress_text = f"{progress_text}  skipped {skipped:,}"
+                duration = self._durations.get(stage)
+                duration_text = ""
+                if duration is not None:
+                    duration_text = f"  {Colors.DIM}{format_time(duration):>{self._duration_width}}{Colors.RESET}"
                 lines.append(
                     f"  {spinner} {color}{stage:<{self._stage_width}}{Colors.RESET} "
-                    f"{color}{status:<{self._status_width}}{Colors.RESET}  {progress_text}"
+                    f"{color}{status:<{self._status_width}}{Colors.RESET}  {progress_text}{duration_text}"
                 )
 
             if self._note:
@@ -1004,6 +1118,7 @@ def _print_summary(
     ingest_total: int,
     ingest_count: int,
     ingest_errors: int,
+    total_duration_s: float | None = None,
 ) -> None:
     print()
     print(f"{Colors.BOLD}Outputs:{Colors.RESET}")
@@ -1018,6 +1133,8 @@ def _print_summary(
     print(f"  Ingested: {ingest_count:,} ({ingest_errors:,} errors)")
     print(f"  Embeddings: {ws.embeddings_dir}")
     print(f"  Database: {ws.db_dir / 'email_search.lancedb'}")
+    if total_duration_s is not None:
+        print(f"  Total time: {format_time(total_duration_s)}")
     print(f"  Logs: {ws.logs_dir}")
     print()
 

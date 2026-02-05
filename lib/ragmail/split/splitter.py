@@ -23,7 +23,7 @@ import argparse
 from datetime import datetime
 from typing import Optional, Dict, TextIO, Tuple, List, Callable
 import time
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from email.utils import parsedate_to_datetime
 import signal
 
@@ -271,7 +271,7 @@ class MboxSplitter:
         self.progress_callback = progress_callback
         self.show_progress = show_progress
 
-        self.output_files: Dict[str, TextIO] = {}
+        self.output_files: "OrderedDict[str, TextIO]" = OrderedDict()
         self.hashers: Dict[str, hashlib.sha256] = {}
         self.display = ProgressDisplay()
 
@@ -290,6 +290,9 @@ class MboxSplitter:
         self._progress_interval = 0.1
         self._progress_step = 25
         self._last_progress_count = 0
+        self.max_open_files = 64
+        self._last_flush_time = 0.0
+        self._flush_interval = 2.0
 
     def _emit_progress(self, position: int, file_size: int, force: bool = False) -> None:
         if not self.progress_callback:
@@ -319,14 +322,28 @@ class MboxSplitter:
             return None
 
         period = f"{year:04d}-{month:02d}"
-        if period not in self.output_files:
-            filepath = os.path.join(self.output_dir, f"{period}.mbox")
-            # Check if resuming
-            mode = 'ab' if os.path.exists(filepath) else 'wb'
-            self.output_files[period] = open(filepath, mode)
+        handle = self.output_files.get(period)
+        if handle is not None:
+            self.output_files.move_to_end(period)
+            return handle
+
+        filepath = os.path.join(self.output_dir, f"{period}.mbox")
+        mode = 'ab' if os.path.exists(filepath) else 'wb'
+        handle = open(filepath, mode, buffering=1024 * 1024)
+        self.output_files[period] = handle
+        self.output_files.move_to_end(period)
+        if period not in self.hashers:
             self.hashers[period] = hashlib.sha256()
 
-        return self.output_files[period]
+        if self.max_open_files and len(self.output_files) > self.max_open_files:
+            old_period, old_handle = self.output_files.popitem(last=False)
+            try:
+                old_handle.flush()
+                old_handle.close()
+            except:
+                pass
+
+        return handle
 
     def _extract_year_month_from_envelope(self, line: str) -> tuple[int, int] | None:
         """Extract year and month from MBOX envelope 'From ' line."""
@@ -568,6 +585,7 @@ class MboxSplitter:
                             period, info = self._process_email(current_email_lines, current_envelope_date)
 
                             self.processed_emails += 1
+                            email_size = sum(len(chunk) for chunk in current_email_lines)
                             if period:
                                 period_key = f"{period[0]:04d}-{period[1]:02d}"
                                 out_file = self._get_output_file(period[0], period[1])
@@ -575,18 +593,18 @@ class MboxSplitter:
                                     email_bytes = b''.join(current_email_lines)
                                     out_file.write(email_bytes)
                                     self.hashers[period_key].update(email_bytes)
-                                    self.display.update(period_key, len(email_bytes), position, info)
+                                    self.display.update(period_key, email_size, position, info)
                                     self.written_emails += 1
                                 else:
                                     # Filtered out
-                                    self.display.update(None, len(b''.join(current_email_lines)), position, info)
+                                    self.display.update(None, email_size, position, info)
                                     self.skipped_emails += 1
                             else:
                                 # Couldn't determine date
                                 self.display.add_error()
                                 self.display.update(
                                     None,
-                                    len(b''.join(current_email_lines)),
+                                    email_size,
                                     position,
                                     f"[unknown date] {info}",
                                 )
@@ -612,14 +630,16 @@ class MboxSplitter:
                             self.display.render()
                         self._emit_progress(position, file_size)
                         last_render_time = now
-                        # Flush all output files periodically
-                        for out_f in self.output_files.values():
-                            out_f.flush()
+                        if (time.monotonic() - self._last_flush_time) >= self._flush_interval:
+                            for out_f in self.output_files.values():
+                                out_f.flush()
+                            self._last_flush_time = time.monotonic()
 
                 # Process final email
                 if current_email_lines and not interrupted:
                     period, info = self._process_email(current_email_lines, current_envelope_date)
                     self.processed_emails += 1
+                    email_size = sum(len(chunk) for chunk in current_email_lines)
                     if period:
                         period_key = f"{period[0]:04d}-{period[1]:02d}"
                         out_file = self._get_output_file(period[0], period[1])
@@ -627,14 +647,14 @@ class MboxSplitter:
                             email_bytes = b''.join(current_email_lines)
                             out_file.write(email_bytes)
                             self.hashers[period_key].update(email_bytes)
-                            self.display.update(period_key, len(email_bytes), position, info)
+                            self.display.update(period_key, email_size, position, info)
                             self.written_emails += 1
                         else:
-                            self.display.update(None, len(b''.join(current_email_lines)), position, info)
+                            self.display.update(None, email_size, position, info)
                             self.skipped_emails += 1
                     else:
                         self.display.add_error()
-                        self.display.update(None, len(b''.join(current_email_lines)), position,
+                        self.display.update(None, email_size, position,
                                            f"[unknown date] {info}")
                         self.skipped_emails += 1
                         self.error_emails += 1

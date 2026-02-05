@@ -209,6 +209,11 @@ cli.add_command(serve)
     is_flag=True,
     help="Skip per-email existence check (auto-enabled on new/empty databases)",
 )
+@click.option(
+    "--traceback/--no-traceback",
+    default=False,
+    help="Show full error traceback on failure",
+)
 def pipeline(
     input_mbox: tuple[Path, ...],
     workspace_name: str,
@@ -228,6 +233,7 @@ def pipeline(
     embeddings_dir: Path | None,
     stages: str | None,
     skip_exists_check: bool,
+    traceback: bool,
 ) -> None:
     """Run split -> index -> clean -> ingest pipeline in a workspace."""
     repair_embeddings = not no_repair_embeddings
@@ -249,26 +255,34 @@ def pipeline(
         raise click.ClickException("--clean-dir can only be used for vectorize/ingest stages.")
     if not input_mbox and (stage_set is None or "split" in stage_set):
         raise click.ClickException("Provide at least one input MBOX file.")
-    run_pipeline(
-        list(input_mbox),
-        workspace_name=workspace_name,
-        years=years or None,
-        resume=resume,
-        refresh=refresh,
-        base_dir=base_dir,
-        cache_dir=cache_dir,
-        clean_dir=clean_dir,
-        ingest_batch_size=ingest_batch_size,
-        embedding_batch_size=embedding_batch_size,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        checkpoint_interval=checkpoint_interval,
-        compact_every=compact_every,
-        repair_embeddings=repair_embeddings,
-        embeddings_dir=embeddings_dir,
-        stages=stage_set,
-        skip_exists_check=skip_exists_check if skip_exists_check else None,
-    )
+    try:
+        run_pipeline(
+            list(input_mbox),
+            workspace_name=workspace_name,
+            years=years or None,
+            resume=resume,
+            refresh=refresh,
+            base_dir=base_dir,
+            cache_dir=cache_dir,
+            clean_dir=clean_dir,
+            ingest_batch_size=ingest_batch_size,
+            embedding_batch_size=embedding_batch_size,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            checkpoint_interval=checkpoint_interval,
+            compact_every=compact_every,
+            repair_embeddings=repair_embeddings,
+            embeddings_dir=embeddings_dir,
+            stages=stage_set,
+            skip_exists_check=skip_exists_check if skip_exists_check else None,
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        if traceback:
+            raise
+        message = str(exc).strip() or "Pipeline failed."
+        raise click.ClickException(f"{message} (rerun with --traceback for details)") from None
 
 
 @cli.command("message")
