@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Callable
 import time
-import signal
 
 import numpy as np
 import pyarrow as pa
 from numpy.typing import NDArray
 
+from ragmail.common import signals
 from ragmail.config import get_settings
 from ragmail.embedding import create_embedding_provider
 from ragmail.ingest import IngestPipeline
@@ -18,18 +18,6 @@ from ragmail.ingest.text_processing import clean_body_for_embedding, chunk_text
 from ragmail.storage import Database, EmailRepository
 from ragmail.storage.schema import create_email_chunk_schema, create_email_schema_flat
 from ragmail.vectorize.store import EmbeddingMeta, EmbeddingStore, default_embedding_path
-
-_INGEST_INTERRUPTED = False
-
-
-def _ingest_signal_handler(signum, frame):
-    global _INGEST_INTERRUPTED
-    _INGEST_INTERRUPTED = True
-
-
-signal.signal(signal.SIGINT, _ingest_signal_handler)
-signal.signal(signal.SIGTERM, _ingest_signal_handler)
-
 
 def ingest_files(
     input_files: Iterable[Path],
@@ -48,8 +36,7 @@ def ingest_files(
     compact_every: int | None = None,
     compaction_callback: Callable[[dict], None] | None = None,
 ) -> int:
-    global _INGEST_INTERRUPTED
-    _INGEST_INTERRUPTED = False
+    signals.install_signal_handlers()
     settings = get_settings()
     db_path_existed = db_path.exists()
     effective_ingest_batch_size = (
@@ -136,8 +123,7 @@ def ingest_files(
             last_progress_time = now
 
     def _check_interrupt():
-        if _INGEST_INTERRUPTED:
-            raise KeyboardInterrupt
+        signals.raise_if_interrupted()
 
     def _maybe_compact(reason: str = "periodic") -> None:
         nonlocal next_compact
@@ -263,8 +249,7 @@ def ingest_files_from_embeddings(
     embedding_provider=None,
     bulk_import: bool = False,
 ) -> int:
-    global _INGEST_INTERRUPTED
-    _INGEST_INTERRUPTED = False
+    signals.install_signal_handlers()
 
     settings = get_settings()
     effective_ingest_batch_size = (
@@ -418,8 +403,7 @@ def ingest_files_from_embeddings(
             last_progress_time = now
 
     def _check_interrupt():
-        if _INGEST_INTERRUPTED:
-            raise KeyboardInterrupt
+        signals.raise_if_interrupted()
 
     def _maybe_compact(reason: str = "periodic") -> None:
         nonlocal next_compact
@@ -788,6 +772,7 @@ def _process_batch_from_embeddings(
     embedding_provider=None,
     embedding_batch_size: int | None = None,
 ) -> None:
+    signals.raise_if_interrupted()
     email_ids = [email.email_id for email in batch]
     subject_map, chunk_vectors_by_email, chunk_texts_by_email = _resolve_embeddings_for_batch(
         batch,
@@ -846,6 +831,7 @@ def _process_batch(
     chunk_overlap: int,
 ):
     """Process a batch of emails."""
+    signals.raise_if_interrupted()
     subject_texts = [f"Subject: {email.subject}".strip() for email in batch]
     subject_vectors = embedding_provider.encode(
         subject_texts,
@@ -871,6 +857,7 @@ def _process_batch(
 
     chunk_vectors = None
     if chunk_texts:
+        signals.raise_if_interrupted()
         chunk_vectors = embedding_provider.encode(
             chunk_texts,
             batch_size=batch_size,
@@ -919,6 +906,9 @@ def _bulk_ingest_from_embeddings(
     email_schema = EmailRecordFlat.to_arrow_schema()
     chunk_schema = EmailChunkRecord.to_arrow_schema()
 
+    def _check_interrupt():
+        signals.raise_if_interrupted()
+
     def _maybe_emit_progress(force: bool = False):
         nonlocal last_progress_time
         if not progress_callback:
@@ -945,6 +935,7 @@ def _bulk_ingest_from_embeddings(
     def _iter_email_batches():
         nonlocal processed
         for input_file in input_files:
+            _check_interrupt()
             store = EmbeddingStore(_resolve_embedding_path(input_file, embeddings_dir, None))
             pipeline = IngestPipeline(
                 checkpoint_dir=None,
@@ -960,8 +951,10 @@ def _bulk_ingest_from_embeddings(
                 max_errors=max_errors,
                 error_callback=_error_callback,
             ):
+                _check_interrupt()
                 batch.append(email)
                 if len(batch) >= ingest_batch_size:
+                    _check_interrupt()
                     if limit and processed + len(batch) > limit:
                         batch = batch[: max(0, limit - processed)]
                     if not batch:
@@ -988,6 +981,7 @@ def _bulk_ingest_from_embeddings(
                     break
 
             if batch and (not limit or processed < limit):
+                _check_interrupt()
                 if limit and processed + len(batch) > limit:
                     batch = batch[: max(0, limit - processed)]
                 if not batch:
@@ -1020,6 +1014,7 @@ def _bulk_ingest_from_embeddings(
     def _iter_chunk_batches():
         chunk_processed = 0
         for input_file in input_files:
+            _check_interrupt()
             store = EmbeddingStore(_resolve_embedding_path(input_file, embeddings_dir, None))
             pipeline = IngestPipeline(
                 checkpoint_dir=None,
@@ -1034,8 +1029,10 @@ def _bulk_ingest_from_embeddings(
                 strict=strict,
                 max_errors=max_errors,
             ):
+                _check_interrupt()
                 batch.append(email)
                 if len(batch) >= ingest_batch_size:
+                    _check_interrupt()
                     if limit and chunk_processed + len(batch) > limit:
                         batch = batch[: max(0, limit - chunk_processed)]
                     if not batch:
@@ -1058,6 +1055,7 @@ def _bulk_ingest_from_embeddings(
                     break
 
             if batch and (not limit or chunk_processed < limit):
+                _check_interrupt()
                 if limit and chunk_processed + len(batch) > limit:
                     batch = batch[: max(0, limit - chunk_processed)]
                 if not batch:

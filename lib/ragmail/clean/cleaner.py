@@ -31,7 +31,7 @@ from email import policy
 from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Optional, List, Tuple, Dict, Any
-import signal
+from ragmail.common import signals
 
 from ragmail.common.terminal import Colors, Glyphs, ProgressDisplay, format_bytes, format_time
 from ragmail.common.checkpoint import Checkpoint
@@ -48,20 +48,6 @@ try:
     HAS_CHARDET = True
 except ImportError:
     HAS_CHARDET = False
-
-
-# =============================================================================
-# SIGNAL HANDLING
-# =============================================================================
-
-interrupted = False
-
-def signal_handler(signum, frame):
-    global interrupted
-    interrupted = True
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
 
 
 # =============================================================================
@@ -760,7 +746,7 @@ def process_mbox(
     index_writer=None,
 ):
     """Process a single mbox file with streaming and checkpointing."""
-    global interrupted
+    signals.install_signal_handlers()
 
     # Determine output paths
     base_name = os.path.splitext(input_path)[0]
@@ -821,7 +807,7 @@ def process_mbox(
     try:
         with MboxStreamParser(input_path, start_position) as parser:
             for position, raw_bytes in parser:
-                if interrupted:
+                if signals.interrupted():
                     break
 
                 msg, envelope_from = parse_email_bytes(raw_bytes)
@@ -944,7 +930,7 @@ def process_mbox(
     display.current_position = stats.last_good_position
 
     # Final display
-    if interrupted:
+    if signals.interrupted():
         checkpoint.save(stats.last_good_position, stats.to_dict())
         if show_progress:
             display.finalize(success=False, message="Interrupted - checkpoint saved")

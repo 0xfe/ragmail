@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import shutil
+import signal
+import shlex
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Iterable
@@ -12,6 +14,7 @@ import time
 from datetime import datetime
 
 from ragmail.clean.cleaner import process_mbox
+from ragmail.common import signals
 from ragmail.common.terminal import Colors, format_time, format_bytes
 from ragmail.split.splitter import MboxSplitter
 from ragmail.workspace import Workspace, default_cache_root, get_workspace
@@ -71,6 +74,8 @@ def run_pipeline(
     if refresh and _selected("ingest"):
         skip_exists_effective = True
 
+    signals.reset_interrupt()
+
     pipeline_start = time.monotonic()
     _print_header(
         ws=ws,
@@ -90,6 +95,23 @@ def run_pipeline(
     )
     spinner_thread.start()
 
+    interrupt_note_printed = False
+
+    def _on_interrupt(signum: int) -> None:
+        nonlocal interrupt_note_printed
+        if interrupt_note_printed:
+            return
+        interrupt_note_printed = True
+        try:
+            sig_name = signal.Signals(signum).name
+        except Exception:
+            sig_name = str(signum)
+        stage_display.note("Interrupt received. Finishing current batch and saving checkpoints...")
+        stop_spinner.set()
+        _log_event(ws, "pipeline", "WARN", f"interrupt received ({sig_name})")
+
+    signals.install_signal_handlers(_on_interrupt)
+
     if not resume_effective and not refresh:
         ws.reset_state()
 
@@ -105,6 +127,11 @@ def run_pipeline(
         try:
             with _stage_log(ws, "download"):
                 _warmup_dependencies()
+        except KeyboardInterrupt:
+            stage_display.update("download", "interrupted")
+            ws.update_stage("download", "interrupted")
+            _log_event(ws, "download", "WARN", "interrupted")
+            raise
         except Exception:
             stage_display.update("download", "failed")
             ws.update_stage("download", "failed")
@@ -225,6 +252,11 @@ def run_pipeline(
                         "bytes_total": split_total_bytes,
                     },
                 )
+        except KeyboardInterrupt:
+            stage_display.update("split", "interrupted")
+            ws.update_stage("split", "interrupted")
+            _log_event(ws, "split", "WARN", "interrupted")
+            raise
         except Exception:
             stage_display.update("split", "failed")
             ws.update_stage("split", "failed")
@@ -332,6 +364,11 @@ def run_pipeline(
                 )
                 index_count = index_stats.indexed
                 stage_display.update_progress("index", processed=index_count)
+        except KeyboardInterrupt:
+            stage_display.update("index", "interrupted")
+            ws.update_stage("index", "interrupted")
+            _log_event(ws, "index", "WARN", "interrupted")
+            raise
         except Exception:
             stage_display.update("index", "failed")
             ws.update_stage("index", "failed")
@@ -471,6 +508,15 @@ def run_pipeline(
                             skipped=clean_skipped,
                             meta={"spam": clean_spam, "errors": clean_errors},
                         )
+        except KeyboardInterrupt:
+            if index_in_clean:
+                stage_display.update("index", "interrupted")
+                ws.update_stage("index", "interrupted")
+                _log_event(ws, "index", "WARN", "interrupted")
+            stage_display.update("clean", "interrupted")
+            ws.update_stage("clean", "interrupted")
+            _log_event(ws, "clean", "WARN", "interrupted")
+            raise
         except Exception:
             if index_in_clean:
                 stage_display.update("index", "failed")
@@ -588,6 +634,11 @@ def run_pipeline(
                     chunk_overlap=chunk_overlap,
                     checkpoint_interval=checkpoint_interval,
                 )
+        except KeyboardInterrupt:
+            stage_display.update("vectorize", "interrupted")
+            ws.update_stage("vectorize", "interrupted")
+            _log_event(ws, "vectorize", "WARN", "interrupted")
+            raise
         except Exception:
             stage_display.update("vectorize", "failed")
             ws.update_stage("vectorize", "failed")
@@ -758,6 +809,11 @@ def run_pipeline(
                     repair_missing_embeddings=repair_embeddings,
                 )
                 ingest_skipped = max(0, ingest_total - ingest_count)
+        except KeyboardInterrupt:
+            stage_display.update("ingest", "interrupted")
+            ws.update_stage("ingest", "interrupted")
+            _log_event(ws, "ingest", "WARN", "interrupted")
+            raise
         except Exception:
             stage_display.update("ingest", "failed")
             ws.update_stage("ingest", "failed")
@@ -939,6 +995,8 @@ def _stage_color(status: str) -> str:
         return Colors.YELLOW
     if status == "failed":
         return Colors.RED
+    if status == "interrupted":
+        return Colors.YELLOW
     if status == "skipped":
         return Colors.BLUE
     return Colors.DIM

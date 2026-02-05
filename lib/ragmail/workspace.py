@@ -121,7 +121,7 @@ class Workspace:
         entry["status"] = status
         if status == "running":
             entry["started_at"] = datetime.now().isoformat()
-        if status in {"done", "failed"}:
+        if status in {"done", "failed", "interrupted"}:
             entry["completed_at"] = datetime.now().isoformat()
         if details:
             entry.setdefault("details", {}).update(details)

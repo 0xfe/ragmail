@@ -4,26 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, Callable
-import signal
 import time
 
+from ragmail.common import signals
 from ragmail.config import get_settings
 from ragmail.embedding import create_embedding_provider
 from ragmail.ingest import IngestPipeline
 from ragmail.ingest.text_processing import clean_body_for_embedding, chunk_text
 from ragmail.vectorize.store import EmbeddingStore, default_embedding_path
-
-_VECTORIZER_INTERRUPTED = False
-
-
-def _vectorize_signal_handler(signum, frame):
-    global _VECTORIZER_INTERRUPTED
-    _VECTORIZER_INTERRUPTED = True
-
-
-signal.signal(signal.SIGINT, _vectorize_signal_handler)
-signal.signal(signal.SIGTERM, _vectorize_signal_handler)
-
 
 def vectorize_files(
     input_files: Iterable[Path],
@@ -43,8 +31,7 @@ def vectorize_files(
     max_errors: int | None = None,
     limit: int | None = None,
 ) -> int:
-    global _VECTORIZER_INTERRUPTED
-    _VECTORIZER_INTERRUPTED = False
+    signals.install_signal_handlers()
 
     settings = get_settings()
     effective_vectorize_batch_size = (
@@ -100,10 +87,10 @@ def vectorize_files(
             last_progress_time = now
 
     def _check_interrupt():
-        if _VECTORIZER_INTERRUPTED:
-            raise KeyboardInterrupt
+        signals.raise_if_interrupted()
 
     for input_file in input_files:
+        _check_interrupt()
         output_path = default_embedding_path(input_file, output_dir)
         store = EmbeddingStore(output_path)
         meta = store.build_meta(
@@ -183,6 +170,7 @@ def _vectorize_batch(
     chunk_size: int,
     chunk_overlap: int,
 ) -> None:
+    signals.raise_if_interrupted()
     subject_texts = [f"Subject: {email.subject}".strip() for email in batch]
     subject_vectors = embedding_provider.encode(
         subject_texts,
@@ -210,6 +198,7 @@ def _vectorize_batch(
 
     chunk_vectors = None
     if chunk_texts:
+        signals.raise_if_interrupted()
         chunk_vectors = embedding_provider.encode(
             chunk_texts,
             batch_size=batch_size,

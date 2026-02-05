@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -276,6 +277,18 @@ def pipeline(
             stages=stage_set,
             skip_exists_check=skip_exists_check if skip_exists_check else None,
         )
+    except KeyboardInterrupt:
+        _print_interrupt_summary(
+            workspace_name=workspace_name,
+            base_dir=base_dir,
+            cache_dir=cache_dir,
+            clean_dir=clean_dir,
+            embeddings_dir=embeddings_dir,
+            input_mbox=list(input_mbox),
+            years=list(years),
+            stages=stage_set,
+        )
+        raise SystemExit(130)
     except click.ClickException:
         raise
     except Exception as exc:
@@ -283,6 +296,65 @@ def pipeline(
             raise
         message = str(exc).strip() or "Pipeline failed."
         raise click.ClickException(f"{message} (rerun with --traceback for details)") from None
+
+
+def _print_interrupt_summary(
+    *,
+    workspace_name: str,
+    base_dir: Path | None,
+    cache_dir: Path | None,
+    clean_dir: Path | None,
+    embeddings_dir: Path | None,
+    input_mbox: list[Path],
+    years: list[int],
+    stages: set[str] | None,
+) -> None:
+    ws = get_workspace(workspace_name, base_dir=base_dir)
+    state = ws.load_state()
+    selected = stages or {"download", "split", "index", "clean", "vectorize", "ingest"}
+    print()
+    print("Interrupted. Checkpoints saved where available.")
+    print("Checkpoint status:")
+    for stage in ["download", "split", "index", "clean", "vectorize", "ingest"]:
+        if stage not in selected:
+            continue
+        status = state.get("stages", {}).get(stage, {}).get("status", "pending")
+        print(f"  {stage:<9} {status}")
+    print()
+    print("Resumption:")
+    print("  Completed stages are skipped; interrupted stages resume from checkpoints when possible.")
+    print("Resume command:")
+    print(f"  {_build_resume_command(input_mbox, workspace_name, base_dir, cache_dir, clean_dir, embeddings_dir, years, stages)}")
+
+
+def _build_resume_command(
+    inputs: list[Path],
+    workspace_name: str,
+    base_dir: Path | None,
+    cache_dir: Path | None,
+    clean_dir: Path | None,
+    embeddings_dir: Path | None,
+    years: list[int],
+    stages: set[str] | None,
+) -> str:
+    args: list[str] = ["ragmail", "pipeline"]
+    if inputs:
+        args.extend(str(p) for p in inputs)
+    args.extend(["--workspace", workspace_name, "--resume"])
+    if base_dir is not None:
+        args.extend(["--base-dir", str(base_dir)])
+    if cache_dir is not None:
+        args.extend(["--cache-dir", str(cache_dir)])
+    if clean_dir is not None:
+        args.extend(["--clean-dir", str(clean_dir)])
+    if embeddings_dir is not None:
+        args.extend(["--embeddings-dir", str(embeddings_dir)])
+    if years:
+        for year in years:
+            args.extend(["--years", str(year)])
+    if stages is not None:
+        args.extend(["--stages", ",".join(sorted(stages))])
+    return " ".join(shlex.quote(arg) for arg in args)
 
 
 @cli.command("message")

@@ -25,7 +25,6 @@ from typing import Optional, Dict, TextIO, Tuple, List, Callable
 import time
 from collections import defaultdict, OrderedDict
 from email.utils import parsedate_to_datetime
-import signal
 
 # ANSI color codes
 class Colors:
@@ -65,15 +64,7 @@ class Glyphs:
     CLOCK = "⏱"
     WARNING = "⚠"
 
-# Global state for signal handling
-interrupted = False
-
-def signal_handler(signum, frame):
-    global interrupted
-    interrupted = True
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+from ragmail.common import signals
 
 
 class ProgressDisplay:
@@ -501,7 +492,7 @@ class MboxSplitter:
 
     def run(self, resume: bool = False):
         """Main processing loop."""
-        global interrupted
+        signals.install_signal_handlers()
 
         # Get file size
         file_size = os.path.getsize(self.input_file)
@@ -557,7 +548,7 @@ class MboxSplitter:
                 render_interval = 0.25  # Render every 250ms
 
                 while True:
-                    if interrupted:
+                    if signals.interrupted():
                         break
 
                     line = f.readline()
@@ -636,7 +627,7 @@ class MboxSplitter:
                             self._last_flush_time = time.monotonic()
 
                 # Process final email
-                if current_email_lines and not interrupted:
+                if current_email_lines and not signals.interrupted():
                     period, info = self._process_email(current_email_lines, current_envelope_date)
                     self.processed_emails += 1
                     email_size = sum(len(chunk) for chunk in current_email_lines)
@@ -662,10 +653,10 @@ class MboxSplitter:
 
             # Final display
             if self.show_progress:
-                self.display.finalize(success=not interrupted)
+                self.display.finalize(success=not signals.interrupted())
             self._emit_progress(position, file_size, force=True)
 
-            if not interrupted:
+            if not signals.interrupted():
                 self._save_hashes()
                 # Remove checkpoint on success
                 if os.path.exists(self.checkpoint_file):

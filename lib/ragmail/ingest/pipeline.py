@@ -94,113 +94,120 @@ class IngestPipeline:
         processed = 0
         last_checkpoint = time.monotonic()
         error_count = 0
-        for idx, message in enumerate(reader):
-            if idx < start_index:
-                if progress and task_id is not None:
-                    progress.advance(task_id)
-                continue
-
-            try:
-                if isinstance(message, dict) and message.get("__ragmail_error__") == "json_decode":
-                    error_count += 1
-                    if error_callback:
-                        error_callback(
-                            {
-                                "kind": "json_decode",
-                                "index": idx,
-                            }
-                        )
-                    self._log_error(
-                        input_path,
-                        idx,
-                        kind="json_decode",
-                        line=message.get("__line__"),
-                        message=message.get("__error__", "JSON decode error"),
-                        raw=message.get("__raw__"),
-                    )
-                    if strict or (max_errors and error_count >= max_errors):
-                        raise IngestStrictError("JSON decode error")
+        last_index = start_index - 1
+        try:
+            for idx, message in enumerate(reader):
+                last_index = idx
+                if idx < start_index:
                     if progress and task_id is not None:
                         progress.advance(task_id)
                     continue
 
-                if validate and parser is self.json_parser:
-                    issues = self.validator.validate(message)
-                    if issues:
+                try:
+                    if isinstance(message, dict) and message.get("__ragmail_error__") == "json_decode":
                         error_count += 1
-                        extra = None
-                        if isinstance(message, dict):
-                            headers = message.get("headers")
-                            if not isinstance(headers, dict):
-                                headers = {}
-                            attachments = message.get("attachments")
-                            content = message.get("content")
-                            extra = {
-                                "subject": headers.get("subject"),
-                                "message_id": headers.get("message_id"),
-                                "thread_id": headers.get("thread_id"),
-                                "attachments": len(attachments)
-                                if isinstance(attachments, list)
-                                else None,
-                                "content_blocks": len(content) if isinstance(content, list) else None,
-                            }
                         if error_callback:
                             error_callback(
                                 {
-                                    "kind": "validation",
+                                    "kind": "json_decode",
                                     "index": idx,
-                                    "issues": issues,
-                                    "extra": extra,
                                 }
                             )
                         self._log_error(
                             input_path,
                             idx,
-                            kind="validation",
-                            issues=issues,
-                            extra=extra,
+                            kind="json_decode",
+                            line=message.get("__line__"),
+                            message=message.get("__error__", "JSON decode error"),
+                            raw=message.get("__raw__"),
                         )
                         if strict or (max_errors and error_count >= max_errors):
-                            raise IngestStrictError("Validation error")
+                            raise IngestStrictError("JSON decode error")
                         if progress and task_id is not None:
                             progress.advance(task_id)
                         continue
 
-                if validate_only:
+                    if validate and parser is self.json_parser:
+                        issues = self.validator.validate(message)
+                        if issues:
+                            error_count += 1
+                            extra = None
+                            if isinstance(message, dict):
+                                headers = message.get("headers")
+                                if not isinstance(headers, dict):
+                                    headers = {}
+                                attachments = message.get("attachments")
+                                content = message.get("content")
+                                extra = {
+                                    "subject": headers.get("subject"),
+                                    "message_id": headers.get("message_id"),
+                                    "thread_id": headers.get("thread_id"),
+                                    "attachments": len(attachments)
+                                    if isinstance(attachments, list)
+                                    else None,
+                                    "content_blocks": len(content) if isinstance(content, list) else None,
+                                }
+                            if error_callback:
+                                error_callback(
+                                    {
+                                        "kind": "validation",
+                                        "index": idx,
+                                        "issues": issues,
+                                        "extra": extra,
+                                    }
+                                )
+                            self._log_error(
+                                input_path,
+                                idx,
+                                kind="validation",
+                                issues=issues,
+                                extra=extra,
+                            )
+                            if strict or (max_errors and error_count >= max_errors):
+                                raise IngestStrictError("Validation error")
+                            if progress and task_id is not None:
+                                progress.advance(task_id)
+                            continue
+
+                    if validate_only:
+                        if progress and task_id is not None:
+                            progress.advance(task_id)
+                        continue
+
+                    email = parser.parse(message)
+                    if callback:
+                        callback(email)
+                    yield email
+                    processed += 1
+
                     if progress and task_id is not None:
                         progress.advance(task_id)
-                    continue
 
-                email = parser.parse(message)
-                if callback:
-                    callback(email)
-                yield email
-                processed += 1
+                    if (
+                        self.checkpoint_dir
+                        and (time.monotonic() - last_checkpoint) >= self.checkpoint_interval
+                    ):
+                        self._save_checkpoint(input_path, idx + 1)
+                        last_checkpoint = time.monotonic()
 
-                if progress and task_id is not None:
-                    progress.advance(task_id)
-
-                if (
-                    self.checkpoint_dir
-                    and (time.monotonic() - last_checkpoint) >= self.checkpoint_interval
-                ):
-                    self._save_checkpoint(input_path, idx + 1)
-                    last_checkpoint = time.monotonic()
-
-            except IngestStrictError:
-                raise
-            except Exception as e:
-                if error_callback:
-                    error_callback(
-                        {
-                            "kind": "parse",
-                            "index": idx,
-                        }
-                    )
-                self._log_error(input_path, idx, kind="parse", message=str(e))
-                if strict:
+                except IngestStrictError:
                     raise
-                continue
+                except Exception as e:
+                    if error_callback:
+                        error_callback(
+                            {
+                                "kind": "parse",
+                                "index": idx,
+                            }
+                        )
+                    self._log_error(input_path, idx, kind="parse", message=str(e))
+                    if strict:
+                        raise
+                    continue
+        except KeyboardInterrupt:
+            if self.checkpoint_dir and last_index >= 0:
+                self._save_checkpoint(input_path, last_index + 1)
+            raise
 
         if self.checkpoint_dir:
             self._clear_checkpoint(input_path)
