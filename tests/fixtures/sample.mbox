@@ -1,0 +1,79 @@
+From test@example.com Sat Jan  1 00:00:00 2022
+From: John Doe <john@example.com>
+To: jane@example.com
+Subject: Meeting Tomorrow
+Date: Sat, 01 Jan 2022 10:00:00 -0500
+Message-ID: <msg001@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Hi Jane,
+
+Let's meet tomorrow at 2pm to discuss the project.
+
+Best,
+John
+
+From jane@example.com Sat Jan  2 00:00:00 2022
+From: Jane Smith <jane@example.com>
+To: john@example.com
+Subject: Re: Meeting Tomorrow
+Date: Sun, 02 Jan 2022 09:00:00 -0500
+Message-ID: <msg002@example.com>
+In-Reply-To: <msg001@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Hi John,
+
+Sounds good! I'll prepare the quarterly report.
+
+Jane
+
+From boss@company.com Mon Jan  3 00:00:00 2022
+From: The Boss <boss@company.com>
+To: team@company.com
+Subject: Q4 Results
+Date: Mon, 03 Jan 2022 14:00:00 -0500
+Message-ID: <msg003@example.com>
+X-Gmail-Labels: Important, Work
+Content-Type: text/plain; charset="utf-8"
+
+Team,
+
+Great job on Q4! Revenue exceeded expectations.
+
+Regards,
+Management
+
+From hr@company.com Wed Jan  5 00:00:00 2022
+From: HR Department <hr@company.com>
+To: all@company.com
+Subject: Benefits Enrollment Reminder
+Date: Wed, 05 Jan 2022 11:00:00 -0500
+Message-ID: <msg004@example.com>
+X-Gmail-Labels: HR, Benefits
+Content-Type: text/plain; charset="utf-8"
+
+Dear Employees,
+
+This is a reminder that benefits enrollment closes on January 15th.
+Please submit your elections through the HR portal.
+
+Thanks,
+Human Resources
+
+From john@example.com Thu Jan  6 00:00:00 2022
+From: John Doe <john@example.com>
+To: team@example.com
+Subject: Project Update - Taxes Due
+Date: Thu, 06 Jan 2022 16:00:00 -0500
+Message-ID: <msg005@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Hi Team,
+
+Just a reminder that the tax filing deadline is approaching.
+Please make sure all expense reports are submitted by end of week.
+
+Thanks,
+John
+

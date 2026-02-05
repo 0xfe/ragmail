@@ -1,0 +1,7 @@
+private/
+email_search.lancedb
+workspaces
+dist
+.ragmail-cache
+.tgz
+*.tar.gz
