@@ -228,3 +228,4 @@ make package-dev
 ## Docs
 
 See `docs/` for detailed documentation.
+For AI agents, `ai-state.md` is the compact, machine-friendly repo briefing.

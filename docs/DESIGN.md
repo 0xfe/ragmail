@@ -1,29 +1,22 @@
 # ragmail Design (M0)
 
 ## Goal
-Unify `ragmail` and `ragmail` into a single program named `ragmail` with one CLI, one workspace model, and a single root venv. Preserve behavior while improving cohesion, validation, and testability.
+Provide a single `ragmail` program with one CLI, one workspace model, and a consistent pipeline for split/clean/vectorize/ingest/search. Preserve behavior while improving cohesion, validation, and testability.
 
 ## Current State Inventory
 
 ### Entry Points
-- `ragmail/ragmail.py`: Clean Gmail MBOX into JSONL for RAG.
-  - Outputs:
-    - `<name>.clean.jsonl`
-    - `<name>.spam.jsonl`
-    - `<name>.mbox.summary`
-  - Supports `--resume` checkpointing.
-- `ragmail/split_mbox.py`: Split MBOX by year.
-  - Supports `--resume`, `--refresh`, `--years`, and `--verify`.
-- `ragmail/sample-mbox.py`: Create small samples for testing.
-  - Supports `--distributed` and `--emails-per-file`.
-- `ragmail/lib/ragmail/cli.py`: Click-based CLI.
-  - Commands: `ingest`, `search`, `stats`, `serve`.
-  - Ingest accepts JSONL or MBOX and uses checkpointing.
+- `lib/ragmail/cli.py`: Click-based CLI.
+  - Commands: `pipeline`, `search`, `stats`, `dedupe`, `serve`, `message`, `workspace`, `ignore`.
+- `lib/ragmail/pipeline.py`: Orchestrates pipeline stages.
+- `lib/ragmail/split/splitter.py`: Split MBOX into monthly files (`YYYY-MM.mbox`).
+- `lib/ragmail/clean/cleaner.py`: Clean MBOX to JSONL (clean + spam + summary).
+- `lib/ragmail/mbox_index.py`: Build the byte-offset index for fast raw-message lookup.
 
 ### Shared Libraries
-- `ragmail/lib/terminal.py`: terminal UI helpers.
-- `ragmail/lib/checkpoint.py`: generic checkpoint support.
-- `ragmail` contains its own config, ingestion, and storage layers.
+- `lib/ragmail/common/terminal.py`: terminal UI helpers.
+- `lib/ragmail/common/checkpoint.py`: generic checkpoint support.
+- `lib/ragmail`: config, ingestion, storage, search, and pipeline layers.
 
 ## Data Formats
 
@@ -62,19 +55,17 @@ Minimal JSON for filtered email summaries:
 - `content` is expected to contain at least one `type="text"` block.
 - Date parsing accepts ISO 8601 and RFC-2822-ish strings.
 
-## Target Architecture (Proposed)
+## Current Architecture
 
 ### Package Layout
-Single top-level package `ragmail/`:
-- `ragmail/cli.py`: unified CLI router
-- `ragmail/clean/`: cleaning pipeline
-- `ragmail/split/`: mbox split
-- `ragmail/ingest/`: JSONL + DB ingestion
-- `ragmail/search/`: search + RAG
-- `ragmail/workspace/`: workspace config and path resolution
-- `ragmail/common/`: progress, checkpointing, shared utilities
-
-Legacy entrypoints remain as thin shims until full migration completes.
+Single top-level package `lib/ragmail/`:
+- `lib/ragmail/cli.py`: unified CLI router
+- `lib/ragmail/clean/`: cleaning pipeline
+- `lib/ragmail/split/`: mbox split
+- `lib/ragmail/ingest/`: JSONL + DB ingestion
+- `lib/ragmail/search/`: search + RAG
+- `lib/ragmail/workspace.py`: workspace config + path resolution
+- `lib/ragmail/common/`: progress, checkpointing, shared utilities
 
 ### Workspace Model
 Workspace directory per dataset:

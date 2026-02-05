@@ -6,3 +6,5 @@ dist
 .tgz
 *.tar.gz
 tmp
+__pycache__
+.venv

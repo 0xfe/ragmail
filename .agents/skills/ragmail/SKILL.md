@@ -23,7 +23,7 @@ Use `uv` to create and manage the repo venv:
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install -r requirements.txt
+uv sync
 ```
 
 ## Locate the database
@@ -299,7 +299,7 @@ python .agents/skills/ragmail/scripts/ragmail_attachments.py \
 
 ### Index location (required)
 The pipeline creates `workspaces/<name>/split/mbox_index.jsonl` (during the `clean` stage). Attachment extraction requires this index.
-If it’s missing, ask the user to run `ragmail pipeline --stages index --workspace <name>`.
+If it’s missing, ask the user to run `ragmail pipeline --stages clean --workspace <name>` (or `--stages index` for index-only).
 
 ## Keep updated
 

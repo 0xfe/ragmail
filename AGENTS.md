@@ -5,7 +5,7 @@ This document provides guidance for AI agents working on email processing tasks 
 ## Project Structure
 
 ```
-email/
+ragmail/
 ├── lib/                  # Core library code
 │   └── ragmail/          # Unified ragmail package (clean + ingest + search)
 ├── tests/                # Test suite
@@ -14,8 +14,22 @@ email/
 │   └── gmail-*.mbox
 ├── workspaces/           # Workspace runs (gitignored)
 ├── README.md             # Repo overview
+├── ai-state.md           # Dense AI-only repo state (keep updated)
 └── AGENTS.md             # This file
 ```
+
+## AI State File (Required)
+
+This repo maintains `ai-state.md` as a compact, AI-focused briefing with the current layout, commands, and design invariants.
+Update it whenever you change pipeline stages, data layout, indexing, embeddings, or any CLI/workspace behavior.
+
+## Engineering Best Practices
+
+- **Code style**: Match existing patterns; avoid mass reformatting. Prefer small, testable functions, explicit types, and `Path` for filesystem paths. Keep streaming primitives for large files.
+- **Robustness**: Preserve checkpointing, resume support, and time-based progress updates. Never load whole MBOX files into memory. Favor idempotent stages that can resume or rerun safely.
+- **UX**: Keep CLI output actionable and consistent. For slow operations, surface progress, ETA, and clear remediation steps on failure. Defaults should be safe and predictable.
+- **Testing**: Run `uv run pytest` for validation. Add/adjust tests when behavior or schemas change. Keep integration tests isolated behind markers.
+- **Docs**: Update `README.md`, `docs/`, `.agents/skills/`, and `ai-state.md` when changing user-facing behavior, schema, or workspace layout.
 
 ## Agent Skills (Codex/Claude)
 
@@ -122,7 +136,7 @@ Filter low-value content:
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install -r requirements.txt
+uv sync
 
 # Create a distributed sample
 uv run python -m ragmail.sample.sampler private/gmail-*.mbox --distributed --emails-per-file 100 -o test-sample.mbox

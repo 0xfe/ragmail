@@ -274,4 +274,4 @@ ragmail pipeline private/gmail-2004.mbox --workspace gmail-2004
 2. **Malformed Emails**: Wrap parsing in try/catch, log errors, continue
 3. **Large Files**: Stream processing, don't load entire file in memory
 4. **Data Loss**: Never modify original files, only create new ones
-5. **Progress Monitoring**: Display progress for large files (like split_mbox.py)
+5. **Progress Monitoring**: Display progress for large files (split stage / MboxSplitter)
