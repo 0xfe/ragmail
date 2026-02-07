@@ -156,7 +156,7 @@ def main() -> int:
     index_path = resolve_index_path(args.workspace, args.index)
     if not index_path or not index_path.exists():
         raise SystemExit(
-            "mbox_index.jsonl not found. Run `ragmail pipeline --stages index --workspace <name>`."
+            "mbox_index.jsonl not found. Run `ragmail pipeline --stages preprocess --workspace <name>`."
         )
 
     record = find_in_index(index_path, message_id, email_id)

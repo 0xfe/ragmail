@@ -77,13 +77,14 @@ Preferred filters:
 
 ## Ingestion pipeline overview
 
-Pipeline stages (see `lib/ragmail/pipeline.py` and `lib/ragmail/ingest/run.py`):
+Pipeline stages (see `python/lib/ragmail/pipeline.py` and `python/lib/ragmail/ingest/run.py`):
 - `ragmail sample` (optional) creates a distributed sample mbox
-- `ragmail clean` parses/cleans mbox into JSONL (`*.clean.jsonl`)
-- `ragmail ingest` embeds and writes records into LanceDB (`email_search.lancedb`)
-- `ragmail pipeline` orchestrates the full flow into a workspace
+- `ragmail pipeline --stages split,preprocess` produces split MBOX files, byte-offset index, and clean JSONL outputs
+- `ragmail pipeline --stages vectorize` produces embeddings (`*.embed.db`)
+- `ragmail pipeline --stages ingest` writes records into LanceDB (`email_search.lancedb`)
+- `ragmail pipeline` orchestrates all stages into a workspace by default
 
-The database schema is defined in `lib/ragmail/storage/schema.py` and the FTS setup in `lib/ragmail/storage/repository.py`.
+The database schema is defined in `python/lib/ragmail/storage/schema.py` and the FTS setup in `python/lib/ragmail/storage/repository.py`.
 
 ## Raw data location
 

@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/**
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust 1.93.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          components: rustfmt, clippy
+
+      - name: Rust fmt
+        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace
+
+  python-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Setup Rust 1.93.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Install dependencies
+        run: UV_PROJECT_ENVIRONMENT="${{ github.workspace }}/.venv" uv sync --project python --extra dev
+
+      - name: Bridge contract tests
+        run: UV_PROJECT_ENVIRONMENT="${{ github.workspace }}/.venv" uv run --project python pytest -c python/pytest.ini python/tests/test_python_bridge_contracts.py
+
+      - name: Rust bridge/parity tests
+        run: UV_PROJECT_ENVIRONMENT="${{ github.workspace }}/.venv" uv run --project python pytest -c python/pytest.ini python/tests/test_rust_pipeline_bridge.py python/tests/test_index_parity.py
+
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Setup Rust 1.93.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Install dependencies
+        run: UV_PROJECT_ENVIRONMENT="${{ github.workspace }}/.venv" uv sync --project python --extra dev
+
+      - name: Benchmark threshold smoke
+        run: UV_PROJECT_ENVIRONMENT="${{ github.workspace }}/.venv" uv run --project python python just.d/scripts/benchmark_threshold.py --messages 2000 --iterations 1 --min-msg-per-s 1 --build-rust-bin

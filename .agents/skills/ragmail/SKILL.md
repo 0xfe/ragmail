@@ -23,7 +23,7 @@ Use `uv` to create and manage the repo venv:
 ```bash
 uv venv
 source .venv/bin/activate
-uv sync
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --project python
 ```
 
 ## Locate the database
@@ -57,11 +57,11 @@ For deeper body matches, use `email_chunks` and search `chunk_text`.
 
 ## Direct Python Queries (recommended)
 
-Use `uv run python - <<'PY'` to run a short script inline. This enables more complex filtering and joins than the CLI wrapper.
+Use `UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python - <<'PY'` to run a short script inline. This enables more complex filtering and joins than the CLI wrapper.
 
 ### Example: FTS + filter + custom projection
 ```bash
-uv run python - <<'PY'
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python - <<'PY'
 import lancedb
 
 db = lancedb.connect("workspaces/2026/db/email_search.lancedb")
@@ -81,7 +81,7 @@ PY
 
 ### Example: Pull full emails after chunk hits
 ```bash
-uv run python - <<'PY'
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python - <<'PY'
 import lancedb
 
 db = lancedb.connect("workspaces/2026/db/email_search.lancedb")
@@ -111,7 +111,7 @@ PY
 
 ### Example: Aggregate counts by sender
 ```bash
-uv run python - <<'PY'
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python - <<'PY'
 import lancedb
 from collections import Counter
 
@@ -207,7 +207,7 @@ python .agents/skills/ragmail/scripts/ragmail_query.py search \
 
 2. Fetch the full email by `email_id` (direct LanceDB query):
 ```bash
-uv run python - <<'PY'
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python - <<'PY'
 import lancedb
 from pathlib import Path
 
@@ -260,11 +260,11 @@ Only fetch or scan attachments if the user explicitly asks. This is rare and exp
 Preferred flow:
 1. Check metadata in LanceDB (`has_attachment`, `attachment_names`, `attachment_types`) to see if attachments exist.
 2. If the user explicitly asks, use the attachment extractor to pull the attachment from the split MBOX.
-3. Use the MBOX index file to avoid full scans. The pipeline creates it during the `clean` stage.
+3. Use the MBOX index file to avoid full scans. The pipeline creates it during the `preprocess` stage.
 
 ### Fast metadata check (no MBOX scan)
 ```bash
-uv run python - <<'PY'
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python - <<'PY'
 import lancedb
 
 db = lancedb.connect("workspaces/2026/db/email_search.lancedb")
@@ -298,8 +298,8 @@ python .agents/skills/ragmail/scripts/ragmail_attachments.py \
 ```
 
 ### Index location (required)
-The pipeline creates `workspaces/<name>/split/mbox_index.jsonl` (during the `clean` stage). Attachment extraction requires this index.
-If it’s missing, ask the user to run `ragmail pipeline --stages clean --workspace <name>` (or `--stages index` for index-only).
+The pipeline creates `workspaces/<name>/split/mbox_index.jsonl` (during the `preprocess` stage). Attachment extraction requires this index.
+If it’s missing, ask the user to run `ragmail pipeline --stages preprocess --workspace <name>`.
 
 ## Keep updated
 

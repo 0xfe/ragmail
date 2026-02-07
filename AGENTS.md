@@ -6,9 +6,12 @@ This document provides guidance for AI agents working on email processing tasks 
 
 ```
 ragmail/
-├── lib/                  # Core library code
-│   └── ragmail/          # Unified ragmail package (clean + ingest + search)
-├── tests/                # Test suite
+├── python/               # Python project (package + deps)
+│   ├── lib/
+│   │   └── ragmail/      # Python orchestration + vectorize/ingest/search interfaces
+│   ├── tests/            # Python test suite
+│   ├── pyproject.toml
+│   └── uv.lock
 ├── docs/                 # Documentation
 ├── private/              # Private email data (gitignored)
 │   └── gmail-*.mbox
@@ -28,7 +31,7 @@ Update it whenever you change pipeline stages, data layout, indexing, embeddings
 - **Code style**: Match existing patterns; avoid mass reformatting. Prefer small, testable functions, explicit types, and `Path` for filesystem paths. Keep streaming primitives for large files.
 - **Robustness**: Preserve checkpointing, resume support, and time-based progress updates. Never load whole MBOX files into memory. Favor idempotent stages that can resume or rerun safely.
 - **UX**: Keep CLI output actionable and consistent. For slow operations, surface progress, ETA, and clear remediation steps on failure. Defaults should be safe and predictable.
-- **Testing**: Run `uv run pytest` for validation. Add/adjust tests when behavior or schemas change. Keep integration tests isolated behind markers.
+- **Testing**: Prefer `just test-python` (venv-first, `uv` fallback) and `cargo test --manifest-path rust/Cargo.toml --workspace`. Keep integration tests isolated behind markers and opt-in env flags.
 - **Docs**: Update `README.md`, `docs/`, `.agents/skills/`, and `ai-state.md` when changing user-facing behavior, schema, or workspace layout.
 
 ## Agent Skills (Codex/Claude)
@@ -55,7 +58,7 @@ Email formats, headers, and content change significantly over time:
 
 **Always test with samples from multiple years:**
 ```bash
-uv run python -m ragmail.sample.sampler private/gmail-*.mbox --distributed --emails-per-file 200 -o test-sample.mbox
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python -m ragmail.sample.sampler private/gmail-*.mbox --distributed --emails-per-file 200 -o test-sample.mbox
 ```
 
 ### 2. Stream Processing for Large Files
@@ -136,16 +139,23 @@ Filter low-value content:
 ```bash
 uv venv
 source .venv/bin/activate
-uv sync
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --project python
 
 # Create a distributed sample
-uv run python -m ragmail.sample.sampler private/gmail-*.mbox --distributed --emails-per-file 100 -o test-sample.mbox
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python -m ragmail.sample.sampler private/gmail-*.mbox --distributed --emails-per-file 100 -o test-sample.mbox
 
 # Full pipeline in a workspace
 ragmail pipeline test-sample.mbox --workspace test-sample
 
 # Search within workspace
 ragmail search "meeting tomorrow" --workspace test-sample
+```
+
+Rust quality gates:
+```bash
+cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --manifest-path rust/Cargo.toml --workspace
 ```
 
 Tip:
@@ -185,7 +195,7 @@ MBOX escapes "From " at line start with ">From ". Our parser only matches "From 
 Always decode with `errors='replace'`. Try charset from Content-Type first, then chardet, then latin-1.
 
 ### Memory issues on large files
-Use streaming parser (MboxStreamParser), not mailbox.mbox() which can be slow on large files.
+Use streaming Rust-backed stage commands (`split`, `preprocess`); avoid any mailbox APIs that materialize entire files.
 
 ### Progress display flicker
 Only render every 250ms, not every email. Use time-based throttling.

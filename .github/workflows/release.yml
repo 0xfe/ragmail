@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust 1.93.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          components: rustfmt, clippy
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Create virtualenv
+        run: uv venv
+
+      - name: Install dependencies
+        run: UV_PROJECT_ENVIRONMENT="${{ github.workspace }}/.venv" uv sync --project python --extra dev
+
+      - name: Release checks
+        run: ./just.d/scripts/release-check.sh
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
+            cross_compile: "false"
+          - os: ubuntu-latest
+            suffix: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
+            cross_compile: "true"
+          - os: macos-13
+            suffix: macos-amd64
+            target: x86_64-apple-darwin
+            deb_arch: ""
+            cross_compile: "false"
+          - os: macos-14
+            suffix: macos-arm64
+            target: aarch64-apple-darwin
+            deb_arch: ""
+            cross_compile: "false"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust 1.93.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Install Linux arm64 cross toolchain
+        if: ${{ matrix.cross_compile == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --manifest-path rust/Cargo.toml --release -p ragmail-cli --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Package release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          binary="rust/target/${{ matrix.target }}/release/ragmail-rs"
+          tar -C "$(dirname "${binary}")" -czf "dist/ragmail-v${version}-${{ matrix.suffix }}.tar.gz" ragmail-rs
+          if [[ -n "${{ matrix.deb_arch }}" ]]; then
+            ./just.d/scripts/package-deb.sh \
+              --version "${version}" \
+              --arch "${{ matrix.deb_arch }}" \
+              --binary "${binary}" \
+              --output "dist/ragmail-rs_${version}_${{ matrix.deb_arch }}.deb"
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Generate checksums and Homebrew formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          ./just.d/scripts/release-publish-assets.sh \
+            --version "${version}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --artifacts-dir release-artifacts \
+            --output-dir release-artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/flat/*
+            release-artifacts/homebrew/ragmail-rs.rb
+
+  publish-homebrew-tap:
+    needs: publish
+    if: ${{ vars.HOMEBREW_TAP_REPO != '' && secrets.HOMEBREW_TAP_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release formula
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Push formula to tap
+        env:
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          ./just.d/scripts/release-publish-assets.sh \
+            --version "${version}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --artifacts-dir release-artifacts \
+            --output-dir release-artifacts
+          ./just.d/scripts/publish-homebrew-tap.sh \
+            --formula release-artifacts/homebrew/ragmail-rs.rb \
+            --tap-repo "${HOMEBREW_TAP_REPO}" \
+            --version "${version}" \
+            --token "${HOMEBREW_TAP_TOKEN}"

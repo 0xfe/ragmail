@@ -1,66 +1,105 @@
 # ai-state.md (ragmail)
 
-Purpose: compact AI-only brief. Keep updated when CLI/stages/schema/workspace layout changes.
+Purpose: dense AI-only brief. Keep updated when CLI/stages/schema/workspace layout or build/release flows change.
 
-Repo entry
-- CLI: `ragmail` -> `lib/ragmail/cli.py` (commands: `pipeline`, `search`, `stats`, `dedupe`, `serve`, `message`, `workspace`, `ignore`).
-- Pipeline: `lib/ragmail/pipeline.py` (stages: download, split, index, clean, vectorize, ingest).
-- Workspace layout: `lib/ragmail/workspace.py`.
+Snapshot (2026-02-06)
+- Active branch: `rust-migration`.
+- Rust toolchain target: `1.93.0` (`rustfmt`, `clippy`, `cargo` required).
+- Python project root: `python/` (`python/pyproject.toml`, `python/uv.lock`, `python/lib/ragmail`).
+- Python tests root: `python/tests` (configured by `python/pytest.ini`).
+- Pipeline direction is now single-path for MBOX heavy stages:
+  - Rust-backed only: `split`, `preprocess` (includes index generation).
+  - Python-only: `vectorize`, `ingest`, `search`, API/LLM interfaces.
+- Legacy Python split/clean/index implementations removed from active path.
+- Legacy CLI flags removed: `--rust-split-index`, `--rust-clean`.
 
-Setup / tests
-- Env: `uv venv && source .venv/bin/activate && uv sync`.
-- Tests: `uv run pytest`.
- - If uv cache permission errors occur, rerun with `UV_CACHE_DIR=.uv-cache`.
+## Current architecture
 
-Workspace layout (default under `workspaces/<name>/`)
-- `inputs/` (symlinked inputs)
-- `split/` (monthly `YYYY-MM.mbox` + `mbox_index.jsonl`)
-- `clean/` (per-month `YYYY-MM.clean.jsonl`)
-- `spam/` (per-month spam JSONL)
-- `reports/` (per-month `.mbox.summary`)
-- `embeddings/` (SQLite `.embed.db` per clean file)
-- `db/` (`email_search.lancedb`)
-- `logs/`, `.checkpoints/`, `cache/`
+### Python entrypoints
+- CLI: `python/lib/ragmail/cli.py`.
+  - `pipeline` command orchestrates stages.
+  - `py vectorize` and `py ingest` are bridge contract commands used by Rust orchestration.
+- Pipeline orchestrator: `python/lib/ragmail/pipeline.py`.
+  - Always calls Rust helpers for split/preprocess.
+  - Resolves repo root by searching parent directories for `rust/Cargo.toml`.
+  - Keeps Python vectorize/ingest options and behavior.
+- Index read helpers: `python/lib/ragmail/mbox_index.py` (`find_in_index`, `read_message_bytes`).
+
+### Rust crates
+- Workspace: `rust/Cargo.toml`
+- CLI binary: `rust/ragmail-cli` (`ragmail-rs`)
+- Core/workspace contracts: `rust/ragmail-core`
+- MBOX stream/split: `rust/ragmail-mbox`
+- Index: `rust/ragmail-index`
+- Clean: `rust/ragmail-clean`
+
+## Workspace layout
+`workspaces/<name>/`
+- `inputs/`
+- `split/` (`YYYY-MM.mbox`, `mbox_index.jsonl`)
+- `clean/` (`*.clean.jsonl`)
+- `spam/` (`*.spam.jsonl`)
+- `reports/` (`*.mbox.summary`)
+- `embeddings/` (`*.embed.db`)
+- `db/email_search.lancedb`
+- `logs/`
+- `.checkpoints/`
 - `workspace.json`, `state.json`
 
-Data flow / stages
-- split: `lib/ragmail/split/splitter.py` streams MBOX, writes `split/YYYY-MM.mbox`, oldest->newest ordering by filename.
-- clean: `lib/ragmail/clean/cleaner.py` -> clean/spam JSONL + summary; writes index records if `index_writer` set.
-- index: `lib/ragmail/mbox_index.py` builds byte-offset index (`mbox_index.jsonl`).
-  - Index is built during `clean` if clean runs; index stage exists for standalone rebuilds.
-- vectorize: `lib/ragmail/vectorize/run.py` creates `.embed.db` per clean file under `embeddings/`.
-- ingest: `lib/ragmail/ingest/run.py` + `lib/ragmail/ingest/pipeline.py` -> LanceDB in `db/`.
-  - Default: repair missing embeddings during ingest; if *no* embeddings exist, fail.
-  - Disable repair with `--no-repair-embeddings`.
+## Stage contract
+Default stage order: `model,split,preprocess,vectorize,ingest`
+- `split`: Rust split command with checkpointed resume (`.checkpoints/split-rs`).
+  - Writer handles are bounded (LRU eviction + flush) to avoid OS `ulimit -n` failures on many-month datasets.
+  - Writers are flushed before checkpoint writes for stronger resume durability.
+- `preprocess`: Rust clean outputs written per split mbox, with index part outputs in `.checkpoints/preprocess-rs/index-parts`, merged into `split/mbox_index.jsonl`.
+- `vectorize`: Python embeddings.
+- `ingest`: Python LanceDB ingest.
 
-Index + raw message lookup
-- `split/mbox_index.jsonl` records `{email_id, message_id, message_id_lower, mbox_file, offset, length}`.
-- `ragmail message --workspace <name> --message-id|--email-id` reads raw bytes via index.
-- `mbox_file`, `mbox_offset`, `mbox_length` are stored in LanceDB during ingest for quick lookup.
+Invariant: `mbox_index.jsonl` is generated during `preprocess` (no standalone index stage in `ragmail pipeline`).
 
-Schema highlights (LanceDB)
-- `emails` (flat) includes: `email_id`, `message_id`, `subject`, `from_*`, `to/cc`, `date`, `body_plain`, `has_attachment`, `attachment_names`, `attachment_types`, `labels_str`, `thread_id`, `in_reply_to`, `year`, `month`, `mbox_file/offset/length`, `subject_vector`.
-- `email_chunks` includes chunk metadata + `chunk_text`, `body_vector`, plus same attachment + mbox fields.
+## Removed legacy code paths
+- Deleted old Python split/clean packages:
+  - `python/lib/ragmail/split/`
+  - `python/lib/ragmail/clean/`
+- Removed Python index builder/writer from active code path.
+- Removed CLI options and resume command emission for legacy rust toggles.
 
-Attachments
-- Metadata only during clean/ingest. Raw attachments are NOT extracted by default.
-- Opt-in: use `.agents/skills/ragmail/scripts/ragmail_attachments.py` to extract via index.
-- Always warn: attachment extraction is slow (scans large MBOX files); require explicit user ask.
+## Skills/docs alignment
+- Skill docs now state `mbox_index.jsonl` is created during `preprocess`.
+- Database skill reference now points to stage-based `ragmail pipeline` flow only.
+- `docs/DESIGN.md` rewritten to Rust-first current architecture.
 
-Search
-- `lib/ragmail/search_cli.py` uses hybrid search (vector + FTS) + optional planner / RAG.
-- FTS index built during ingest; auto-rebuild if corruption detected.
+## Bench tooling
+- `just.d/scripts/benchmark_pipeline.py` now benchmarks Rust pipeline throughput only.
+- `just.d/scripts/benchmark_threshold.py` enforces `--min-msg-per-s` floor.
+- CI benchmark smoke uses:
+  - `UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python just.d/scripts/benchmark_threshold.py --messages 2000 --iterations 1 --min-msg-per-s 1 --build-rust-bin`
 
-Config defaults (`lib/ragmail/config.py`)
-- Embedding model: `nomic-ai/nomic-embed-text-v1.5`, dim 768, batch 32.
-- Chunk size/overlap: 1200 / 200.
-- Cache: `RAGMAIL_CACHE_DIR` or `./.ragmail-cache` (sets HF env vars in `workspace.apply_env`).
+## Build/test/release quick commands
+- Bootstrap:
+  - `just bootstrap` (shared root `.venv` + Rust workspace build)
+- Rust gates:
+  - `cargo fmt --manifest-path rust/Cargo.toml --all -- --check`
+  - `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings`
+  - `cargo test --manifest-path rust/Cargo.toml --workspace`
+- Python tests:
+  - `.venv/bin/python -m pytest -c python/pytest.ini -q`
+- Release gates:
+  - `just release-check`
+  - `just release`
 
-Docs + skills
-- Main docs: `README.md`, `docs/`.
-- Skill: `.agents/skills/ragmail/SKILL.md` (keep in sync with schema + workspace layout).
+Bootstrap notes:
+- Python bootstrap script: `just.d/scripts/bootstrap-python.sh`.
+- `just bootstrap` attempts `uv` first, then falls back to `python -m venv + pip` when needed.
+- Pipeline Rust bridge prefers prebuilt `rust/target/debug/ragmail-rs` if present.
 
-Common pitfalls
-- Index missing: run `ragmail pipeline --stages clean --workspace <name>` (or `--stages index` for index-only).
-- Large files: must stream; never load whole MBOX in memory.
-- Resume: checkpoints live in `.checkpoints/`; clean + index support resume.
+## Key tests for new split/preprocess path
+- `python/tests/test_rust_pipeline_bridge.py`
+- `python/tests/test_index_parity.py` (now Rust-only contract/resume robustness)
+- `python/tests/test_clean_parity.py` (Rust clean contract)
+- `python/tests/test_clean_historical_parity.py` (historical fixture on Rust clean)
+
+## Latest verification snapshot
+- Python full suite: `./just.d/scripts/test-python.sh` => `118 passed, 6 skipped` (2026-02-06).
+- Rust full suite: `cargo test --manifest-path rust/Cargo.toml --workspace` => all tests passed (2026-02-06).
+- Rust lint gate: `just lint` (`cargo fmt --check` + `cargo clippy -D warnings`) => passed (2026-02-06).

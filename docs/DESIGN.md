@@ -1,129 +1,129 @@
-# ragmail Design (M0)
+# Design
 
-## Goal
-Provide a single `ragmail` program with one CLI, one workspace model, and a consistent pipeline for split/clean/vectorize/ingest/search. Preserve behavior while improving cohesion, validation, and testability.
+This document explains the current ragmail architecture.
+It is written for technical users and developers.
 
-## Current State Inventory
+## Goals
 
-### Entry Points
-- `lib/ragmail/cli.py`: Click-based CLI.
-  - Commands: `pipeline`, `search`, `stats`, `dedupe`, `serve`, `message`, `workspace`, `ignore`.
-- `lib/ragmail/pipeline.py`: Orchestrates pipeline stages.
-- `lib/ragmail/split/splitter.py`: Split MBOX into monthly files (`YYYY-MM.mbox`).
-- `lib/ragmail/clean/cleaner.py`: Clean MBOX to JSONL (clean + spam + summary).
-- `lib/ragmail/mbox_index.py`: Build the byte-offset index for fast raw-message lookup.
+- Keep MBOX-heavy work fast and resumable.
+- Keep interfaces stable between stages.
+- Keep workspace outputs inspectable and recoverable.
+- Keep Python for embedding, ingest, search, and LLM integration.
 
-### Shared Libraries
-- `lib/ragmail/common/terminal.py`: terminal UI helpers.
-- `lib/ragmail/common/checkpoint.py`: generic checkpoint support.
-- `lib/ragmail`: config, ingestion, storage, search, and pipeline layers.
+## Architecture Overview
 
-## Data Formats
+ragmail has two runtimes:
+- Rust runtime for `split`, `index`, and `clean`.
+- Python runtime for `download`, `vectorize`, `ingest`, and user-facing search/API layers.
 
-### Clean JSONL (from `ragmail`)
-Each line is a JSON object with these top-level keys:
-- `headers` (dict):
-  - `from`: `{name, email}` or string
-  - `to`, `cc`, `bcc`: list of `{name, email}` or strings
-  - `reply_to`: `{name, email}`
-  - `subject`: string
-  - `date`: ISO 8601 string (e.g. `2015-01-23T15:02:04-08:00`)
-  - `message_id`, `in_reply_to`: string
-  - `references`: list of message IDs
-  - `thread_id`: string (Gmail thread id)
-  - `list_id`: string
-- `tags`: list of Gmail labels
-- `content`: list of blocks `{type: "text", body: "..."}`
-- `attachments` (optional): list of `{filename, content_type, size}`
+Primary entrypoint:
+- `ragmail pipeline ... --workspace <name>`
 
-Example (abbrev):
-```json
-{"headers":{"from":{"name":"Brian","email":"notifications@github.com"},"subject":"...","date":"2015-01-23T15:02:04-08:00"},"tags":["Archived"],"content":[{"type":"text","body":"..."}]}
-```
+The Python CLI orchestrates all stages.
+For Rust stages, Python shells out to Rust commands.
 
-### Spam JSONL (from `ragmail`)
-Minimal JSON for filtered email summaries:
-- `from`, `subject`, `date`, `reason`
+## Stage Ownership
 
-### Summary File
-`<name>.mbox.summary` captures counts, labels, senders, and size reduction.
+| Stage | Owner | Why |
+|---|---|---|
+| `download` | Python | dependency/cache prep logic |
+| `split` | Rust | streaming + checkpointed MBOX partitioning |
+| `index` | Rust | fast byte-offset index build |
+| `clean` | Rust | high-throughput parsing/cleaning/filtering |
+| `vectorize` | Python | embedding models + Python ML ecosystem |
+| `ingest` | Python | LanceDB ingest, compaction, FTS operations |
 
-## Ingestion Expectations (ragmail)
-- `JsonEmailParser` accepts the above JSONL format.
-- Addresses may be dicts or strings.
-- `headers.references` may be list or string.
-- `content` is expected to contain at least one `type="text"` block.
-- Date parsing accepts ISO 8601 and RFC-2822-ish strings.
+## Data Flow
 
-## Current Architecture
+1. Input MBOX files are linked into workspace `inputs/`.
+2. Rust `split` emits month-partitioned MBOX files.
+3. Rust `index` emits `mbox_index.jsonl` for raw-byte lookups.
+4. Rust `clean` emits structured `clean/*.clean.jsonl` and `spam/*.spam.jsonl`.
+5. Python `vectorize` emits embedding stores (`embeddings/*.embed.db`).
+6. Python `ingest` writes normalized records into LanceDB.
 
-### Package Layout
-Single top-level package `lib/ragmail/`:
-- `lib/ragmail/cli.py`: unified CLI router
-- `lib/ragmail/clean/`: cleaning pipeline
-- `lib/ragmail/split/`: mbox split
-- `lib/ragmail/ingest/`: JSONL + DB ingestion
-- `lib/ragmail/search/`: search + RAG
-- `lib/ragmail/workspace.py`: workspace config + path resolution
-- `lib/ragmail/common/`: progress, checkpointing, shared utilities
+## Workspace Model
 
-### Workspace Model
-Workspace directory per dataset:
-```
-workspaces/<name>/
-  inputs/
-  clean/
-  spam/
-  db/
-  logs/
-  .checkpoints/
-  reports/
-  cache/
-  split/
-  workspace.json
-  state.json
-```
-Workspace config file (JSON or YAML) defines paths, defaults, and metadata.
+Workspace root:
+- `workspaces/<name>/`
 
-`workspace.json` contains the workspace name, root, created timestamp, and path map.
-`state.json` tracks pipeline stage status and timestamps for resume support.
-`split/` contains monthly MBOX chunks (`YYYY-MM.mbox`) plus `mbox_index.jsonl`.
+Important subpaths:
+- `split/`: month files plus `mbox_index.jsonl`
+- `clean/`: cleaned JSONL
+- `spam/`: filtered rows
+- `embeddings/`: embedding DB files
+- `db/email_search.lancedb`: final retrieval DB
+- `.checkpoints/`: resumable stage state
+- `logs/`: per-stage logs
+- `state.json`: stage status and details
 
-### CLI Contract (Draft)
-```
-ragmail pipeline <mbox> [--workspace <name>] [--stages split,index,clean,vectorize,ingest] [--resume] [--refresh] [--no-repair-embeddings] [--compact-every <N>]
-ragmail search <query> [--db <path>] [--limit N] [--rag]
-ragmail stats [--db <path>]
-ragmail serve [--db <path>] [--host] [--port]
-```
+## Stage State Contract
 
-## Search + Query Planning
+Each stage tracks status in `state.json`:
+- `pending`
+- `running`
+- `done`
+- `failed`
+- `interrupted`
 
-- Hybrid search combines vector similarity with full-text search (FTS).
-- FTS indexes subject, body, sender/recipient fields, and labels.
-- A structured query planner converts natural language into:
-  - vector query text
-  - FTS query text
-  - metadata filters (year/month/date range/attachments)
-- The planner can be LLM-assisted (`--plan` / `--rag`) and always returns JSON.
+This supports:
+- Safe resume after interruption.
+- Deterministic skip of completed stages.
+- Observable failure details for debugging.
 
-## Validation + Ignore Lists (M4)
-- JSONL validation runs before ingest by default, with `--strict` and `--max-errors` modes (via pipeline ingest stage).
-- Validation errors are logged as structured JSONL (default `errors.jsonl` in checkpoint/logs).
-- Ignore lists are JSON-defined rule sets applied post-cleaning (`ragmail ignore apply`), emitting filtered and ignored JSONL outputs with rule metadata.
+## Key Contracts and Invariants
 
-## Baseline Verification (M0)
-- Created `private/sample-3years.mbox` from 2015/2024/2026 (10 emails each).
-- Ran pipeline split/clean (index built during clean)/vectorize/ingest in a workspace:
-  - Clean: 29, Spam: 1, Errors: 0.
-  - Summary file: `private/sample-3years.mbox.summary`.
-- Ingested into `/tmp/ragmail-test.lancedb`: total 29 emails.
-- Search query `"styling modifiers"` returned expected results.
-- `ragmail stats` returned per-year counts and top senders.
+- MBOX handling is streaming.
+- Stages are resumable and idempotent where practical.
+- `mbox_index.jsonl` format remains stable for message lookup.
+- Clean JSONL schema remains stable for vectorize/ingest/search.
+- Stage outputs are isolated by workspace.
 
-### Notes / Risks
-- Console summary printed `Total processed: 0` while summary file shows 30 processed. Likely a progress/stat display bug.
-- HuggingFace model cache writes failed in this environment (`Operation not permitted`); ingestion still completed. Consider redirecting cache in future (e.g., `HF_HOME` into workspace).
-- `stats` command uses a hardcoded embedding dimension (384). Default model dimension is 768. Verify this in refactor.
+## Rust-Python Boundary
 
-Tracked in: `docs/RISKS.md`
+Python to Rust boundary:
+- Python pipeline invokes Rust stage commands.
+- Python can use `RAGMAIL_RS_BIN` to point at a prebuilt Rust binary.
+
+Rust to Python boundary:
+- Rust orchestrator can call Python bridge commands:
+  - `ragmail py vectorize`
+  - `ragmail py ingest`
+
+This boundary keeps heavy MBOX processing in Rust while preserving Python ML integrations.
+
+## Search and RAG Path
+
+After ingest, retrieval uses LanceDB tables:
+- `emails`
+- `email_chunks`
+
+Search can run fully local.
+LLM-assisted answer generation uses an OpenAI-compatible backend.
+You can route this backend to hosted or local servers.
+
+## Performance Model
+
+Largest wins come from:
+- Rust streaming stages (`split`, `index`, `clean`).
+- Running `vectorize` on GPUs.
+- Stage-only reruns using `--stages` and `--refresh`.
+
+## Failure and Recovery Model
+
+- Checkpoints reduce restart cost.
+- `--resume` continues partial work.
+- `--refresh` archives outputs and reruns selected stages.
+- Logs and state files are stored per workspace.
+
+## Compatibility Notes
+
+- Rust toolchain target is 1.93.0+.
+- `VERSION` is the cross-runtime version source of truth.
+- Release artifacts include macOS and Linux targets.
+
+## Related Docs
+
+- Pipeline deep dive: [`pipeline.md`](pipeline.md)
+- Developer guide: [`developers.md`](developers.md)
+- Release flow: [`release.md`](release.md)

@@ -32,7 +32,7 @@ All prompts follow best practices:
 
 **Purpose**: Generate contextual answers based on retrieved emails while citing sources.
 
-**Location**: `lib/ragmail/prompts.py` - `RAGPrompt` class
+**Location**: `python/lib/ragmail/prompts.py` - `RAGPrompt` class
 
 ### System Message
 
@@ -151,7 +151,7 @@ Key point: The deadline was extended from February 15 to March 1, 2024.
 
 **Purpose**: Decompose complex natural language queries into structured components for better retrieval.
 
-**Location**: `lib/ragmail/prompts.py` - `QueryExpansionPrompt` class
+**Location**: `python/lib/ragmail/prompts.py` - `QueryExpansionPrompt` class
 
 ### System Message
 
@@ -221,7 +221,7 @@ Response:
 
 **Purpose**: Generate a strict JSON query plan for hybrid search.
 
-**Location**: `lib/ragmail/prompts.py` - `QueryPlanPrompt` class
+**Location**: `python/lib/ragmail/prompts.py` - `QueryPlanPrompt` class
 
 ### System Message (Summary)
 
@@ -337,7 +337,7 @@ messages = QUERY_EXPANSION_PROMPT.format(
 
 **Purpose**: Summarize email threads or conversations into concise, structured summaries.
 
-**Location**: `lib/ragmail/prompts.py` - `SummarizationPrompt` class
+**Location**: `python/lib/ragmail/prompts.py` - `SummarizationPrompt` class
 
 ### System Message
 

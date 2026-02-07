@@ -1,0 +1,63 @@
+From alice@example.com Mon Jan  3 08:10:00 +0000 2005
+Message-ID: <msg-2005@example.com>
+From: Alice <alice@example.com>
+To: Team <team@example.com>
+Date: Mon, 3 Jan 2005 08:10:00 +0000
+Subject: =?ISO-8859-1?Q?R=E9union_Notes?=
+X-Gmail-Labels: Inbox,Work
+
+Agenda line 1.
+Agenda line 2.
+-- 
+Alice
+
+From bob@example.com Tue Jun 12 13:45:00 +0000 2012
+Message-ID: <msg-2012@example.com>
+From: Bob <bob@example.com>
+To: Team <team@example.com>
+Date: Tue, 12 Jun 2012 13:45:00 +0000
+Subject: HTML status
+Content-Type: text/html; charset=utf-8
+
+<html><body><h1>Project Update</h1><p>Rendered from HTML only.</p><script>track()</script></body></html>
+
+From list@example.com Thu Sep 15 07:30:00 +0000 2016
+Message-ID: <msg-2016@example.com>
+From: Engineering List <list@example.com>
+To: Team <team@example.com>
+Date: Thu, 15 Sep 2016 07:30:00 +0000
+Subject: [eng] Build status
+Precedence: bulk
+List-ID: <engineering.list.example>
+
+Weekly build status is green.
+
+From carol@example.com Fri Apr 19 17:25:00 +0000 2024
+Message-ID: <msg-2024@example.com>
+From: Carol <carol@example.com>
+To: Team <team@example.com>
+Date: Fri, 19 Apr 2024 17:25:00 +0000
+Subject: Quarterly report
+Content-Type: multipart/mixed; boundary="mix-2024"
+
+--mix-2024
+Content-Type: text/plain; charset=utf-8
+
+Quarterly report attached.
+--mix-2024
+Content-Type: application/pdf; name="q1-report.pdf"
+Content-Disposition: attachment; filename="q1-report.pdf"
+Content-Transfer-Encoding: base64
+
+SGVsbG8=
+--mix-2024--
+
+From promo@example.com Wed Nov  2 10:00:00 +0000 2022
+Message-ID: <msg-2022@example.com>
+From: Promotions <promo@example.com>
+To: Team <team@example.com>
+Date: Wed, 2 Nov 2022 10:00:00 +0000
+Subject: Big Sale
+X-Mailer: HubSpot Automation
+
+Save 50% today.

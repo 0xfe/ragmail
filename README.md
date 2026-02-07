@@ -1,231 +1,199 @@
-# RAGMail
+# RAGmail
 
-RAGmail is an agent skill that searches and analyzes your email data.
+## About
 
-It lets you ask questions like:
+RAGmail lets you search and analyze your email with your favourite agent (Claude, Codex, etc.)
 
-- "How much did the house painting I did last summer cost?"
-- "How many times did Bob email me in Feb 2026?"
-- "Who was Michael's teacher in the 9th grade?"
+Typical questions you can answer:
 
-## How do I use it?
-
-RAGMail can work with any MBOX file, and includes special support for Gmail.
-
-You can start by visiting [Google Takeout](https://takeout.google.com/) and downloading your Gmail data.
-
-Then run `ragmail pipeline` to split, clean, vectorize, and then ingest your emails into a LanceDB vector database. It
-takes care of a lot of tedious work around spam removal, stripping signatures and attachments, dealing with multipart messages,
-building embedding vectors, deduplication, etc.
-
-```bash
-# Create a new workspace under workspaces/foo
-ragmail pipeline private/all-my-emails.mbox --workspace foo
-```
-
-Note, this can take a very long time (>15h on my macbook pro for 15GB of email.) You can make this a lot faster (<1h) on an L4 GPU VM. See instructions below on how to do that.
-
-To analyze your emails, start your favorite AI agent (e.g., Claude Code or Codex) and use the `ragmail` skill.
-
-```
-$ codex
-> load the $ragmail skill in the workspace foo
-...
-Using the ragmail skill for workspace mo. What do you want to find in that workspace
-(query, sender, date range, or topic)?
-...
-> how many times did Bob email me in Feb 2026?
-...
-```
+- "What did we decide about the school trip budget?"
+- "Where all did I travel to in in 2006?"
+- "How many times did Bob email me in February 2026?"
 
 ## Quickstart
-
 ```bash
+# 1) Clone
+git clone <your-repo-url>
+cd ragmail
 
-# Setup env (once)
-uv venv
-uv sync
+# 2) Bootstrap Python + Rust deps
+just bootstrap
 
-# Activate environment
+# 3) Activate the venv
 source .venv/bin/activate
 
-# Run the full pipeline
-ragmail pipeline private/gmail-2015.mbox --workspace test-sample
+# 4) Run full pipeline (model,split,preprocess,vectorize,ingest)
+ragmail pipeline private/gmail-2015.mbox --workspace my-mail
+
+# 5) Search your workspace
+ragmail search "meeting tomorrow" --workspace my-mail
+```
+
+`just bootstrap` now does both:
+- prepares a shared root `.venv` that includes the `ragmail` CLI
+- builds the Rust workspace (so Rust stages are ready before first pipeline run)
+## Quickstart (w/ Remote GPU)
+
+Use this when embedding/vectorization is slow on your local machine. It performs most of the work
+on the local machine, but lets you offload the GPU-heavy work to a remote machine.
+
+
+```bash
+# Local: run preprocessing only
+ragmail pipeline private/gmail-2015.mbox --workspace my-mail --stages split,preprocess
+
+# Local: send clean JSONL to remote GPU host
+# (replace user@host and paths)
+tar -czf my-mail-clean.tar.gz -C workspaces/my-mail clean
+rsync -av my-mail-clean.tar.gz user@host:/data/ragmail/
+
+# Remote: unpack + run vectorize only
+ssh user@host '
+  cd /data/ragmail && \
+  tar -xzf my-mail-clean.tar.gz && \
+  ragmail pipeline \
+    --workspace my-mail \
+    --base-dir /data/ragmail/workspaces \
+    --stages vectorize \
+    --clean-dir /data/ragmail/clean
+'
+
+# Remote: send embeddings back
+tar -czf my-mail-embeddings.tar.gz -C /data/ragmail/workspaces/my-mail embeddings
+rsync -av user@host:/data/ragmail/my-mail-embeddings.tar.gz ./
+
+# Local: unpack embeddings + ingest
+tar -xzf my-mail-embeddings.tar.gz -C workspaces/my-mail
+ragmail pipeline --workspace my-mail --stages ingest
+```
+
+## Prerequisites
+Required:
+- `python` 3.11+
+- Rust toolchain 1.93.0+ (`rustc`, `cargo`, `rustfmt`, `clippy`)
+
+Recommended:
+- `uv` for Python dependency and environment management
+- `just` for common build/test/release commands
+
+Optional for release maintainers:
+
+- `dpkg-deb` for Linux `.deb` packaging
+
+## Usage Instructions
+
+Run `ragmail --help` for the full command list.
+
+Common commands:
+```bash
+# Run full pipeline
+ragmail pipeline private/gmail-2015.mbox --workspace my-mail
+
+# Run specific stages
+ragmail pipeline private/gmail-2015.mbox --workspace my-mail --stages split,preprocess
+ragmail pipeline --workspace my-mail --stages vectorize
+ragmail pipeline --workspace my-mail --stages ingest
+
+# Resume is enabled by default
+ragmail pipeline private/gmail-2015.mbox --workspace my-mail --resume
+
+# Re-run selected stages from scratch (archives old outputs)
+ragmail pipeline private/gmail-2015.mbox --workspace my-mail --stages preprocess --refresh
 
 # Search
-ragmail search "meeting tomorrow" --workspace test-sample
+ragmail search "invoice" --workspace my-mail
+
+# Search with RAG answer generation
+ragmail search "what did we decide about the budget" --workspace my-mail --rag
+
+# Show full raw message bytes by id
+ragmail message --workspace my-mail --email-id <email_id>
+
+# Workspace utilities
+ragmail workspace init my-mail
+ragmail workspace info my-mail
 ```
 
-## Full Remote-GPU Workflow
+Note:
+- A fresh workspace run needs at least one input MBOX when `split` is selected.
+- If you run only `vectorize` and/or `ingest`, `input_mbox` is optional.
 
-This uses stage controls to move work across machines, and only ships the clean JSONL + embeddings.
-
-1. Local machine: split + clean only
-```bash
-ragmail pipeline ~/path/to/mbox --workspace foo --stages split,clean
-```
-
-2. Local machine: package clean JSONL and copy to remote
-```bash
-tar -czf foo-clean.tar.gz workspaces/foo/clean
-rsync -av foo-clean.tar.gz your-vm:/data/ragmail/
-```
-
-3. Remote machine: unpack and vectorize
-```bash
-tar -xzf /data/ragmail/foo-clean.tar.gz -C /data/ragmail/
-ragmail pipeline \
-  --workspace foo \
-  --base-dir /data/ragmail/workspaces \
-  --stages vectorize \
-  --clean-dir /data/ragmail/clean
-```
-
-4. Remote machine: package embeddings and copy back
-```bash
-tar -czf foo-embeddings.tar.gz -C /data/ragmail embeddings
-rsync -av your-vm:/data/ragmail/foo-embeddings.tar.gz ./
-```
-
-5. Local machine: unpack embeddings and ingest
-```bash
-tar -xzf foo-embeddings.tar.gz -C workspaces/foo
-ragmail pipeline --workspace foo --stages ingest
-```
+Useful pipeline flags:
+- `--ingest-batch-size`: write batch size for DB inserts.
+- `--embedding-batch-size`: batch size sent to embedding model.
+- `--chunk-size` and `--chunk-overlap`: control chunk granularity.
+- `--skip-exists-check`: faster ingest when safe.
+- `--checkpoint-interval`: checkpoint frequency.
+- `--compact-every`: periodic DB compaction during ingest.
 
 ## About Workspaces
+Each workspace is an isolated processing run.
+Use one workspace per dataset or experiment.
 
-Workspaces are directories under `workspaces/` that contain all the state for the different stages of a pipeline. If you're
-ingesting multiple mailboxes and want them in different databases, you must use different workspaces.
-
-```bash
-ragmail workspace init my-workspace
-ragmail pipeline private/gmail-2014.mbox private/gmail-2015.mbox --workspace my-workspace
-
-# Search within workspace without specifying --db
-ragmail search "meeting tomorrow" --workspace my-workspace
+Default layout:
+```text
+workspaces/<name>/
+├── inputs/                 # linked input mbox files
+├── split/                  # monthly mbox files + mbox_index.jsonl
+├── clean/                  # cleaned jsonl
+├── spam/                   # filtered bulk/spam jsonl
+├── reports/                # per-file summary reports
+├── embeddings/             # embedding stores (*.embed.db)
+├── db/
+│   └── email_search.lancedb
+├── logs/                   # stage logs
+├── .checkpoints/           # resume checkpoints
+├── workspace.json          # workspace config/paths
+└── state.json              # stage state + durations
 ```
 
-### Pipeline Stages
+You can set a different root with `--base-dir`.
 
-You can run specific stages only:
+## Cost / Performance / Privacy Tradeoffs
+### What runs locally by default
+By default, all pipeline stages run on your machine.
+
+- `model`, `split`, `preprocess`: local processing (`split`/`preprocess` are Rust-backed).
+- `vectorize`: local embedding inference.
+- `ingest`: local LanceDB writes.
+- `search`: local retrieval.
+
+No email data must leave your machine for these steps.
+
+### What can call external models
+LLM-assisted features (for example `ragmail search --rag`) can call an OpenAI-compatible API.
+
+You control this with environment variables:
 ```bash
-ragmail pipeline private/gmail-2015.mbox --workspace my-workspace --stages split,clean
-ragmail pipeline --workspace my-workspace --stages vectorize
-ragmail pipeline --workspace my-workspace --stages ingest
+# Use a trusted hosted provider (default style)
+export EMAIL_SEARCH_OPENAI_BASE_URL="https://api.openai.com/v1"
+export EMAIL_SEARCH_OPENAI_API_KEY="<key>"
+export EMAIL_SEARCH_OPENAI_MODEL="gpt-5.2"
 ```
 
-You can also point vectorize/ingest at a directory of clean JSONL files:
+You can also point to a local OpenAI-compatible server, such as Ollama or vLLM:
 ```bash
-ragmail pipeline --workspace my-workspace --stages vectorize --clean-dir /data/clean
-ragmail pipeline --workspace my-workspace --stages ingest --clean-dir /data/clean
+# Example: local OpenAI-compatible endpoint
+export EMAIL_SEARCH_OPENAI_BASE_URL="http://localhost:11434/v1"
+export EMAIL_SEARCH_OPENAI_API_KEY="dummy"
+export EMAIL_SEARCH_OPENAI_MODEL="llama3.1"
 ```
 
-Stages:
-- `download` (dependency warmup)
-- `split`
-- `index` (MBOX byte-offset index; built during `clean`)
-- `clean`
-- `vectorize`
-- `ingest`
+### Moving compute to cloud GPUs
+For faster embeddings, run only `vectorize` on a GPU machine.
 
-Note: ingest expects embeddings produced by the `vectorize` stage. If none exist, run `ragmail pipeline --stages vectorize` first.
+For maximum throughput, run all stages on a GPU-backed cloud VM:
+- Upload MBOX to a GCP or AWS VM.
+- Run full `ragmail pipeline` there.
+- Download only the workspace outputs you need.
 
-Split output files are monthly: `workspaces/<name>/split/YYYY-MM.mbox` (processed oldest to newest).
-Ingest stores `mbox_file`, `mbox_offset`, and `mbox_length` in LanceDB for fast raw message lookup.
+This improves speed, but it changes your data boundary.
+Use encryption and your organization’s data policy.
 
-Cache note:
-- Default model cache: `./.ragmail-cache`
-- Override with `--cache-dir /path/to/cache`
-
-## Ingest Tuning (Speed)
-
-You can tune ingestion from the CLI:
-
-- `--ingest-batch-size`: how many emails to buffer before writing to the DB. Larger = fewer writes.
-- `--embedding-batch-size`: batch size sent to the embedding model. Larger = faster if you have GPU/CPU memory.
-  This controls how many texts the model embeds per call, while `--ingest-batch-size` controls how many emails are flushed per DB write.
-- `--chunk-size` / `--chunk-overlap`: controls body chunking. Fewer chunks = faster ingestion.
-- `--skip-exists-check`: skips per-email existence lookups. This is auto-enabled for new or empty databases.
-- `--checkpoint-interval`: checkpoint interval in seconds (default: 120). This allows session resumption.
-- `--refresh`: rerun selected stages from scratch. Existing outputs are archived to `workspaces/<name>/old/YYMMDDHHMMSS/` and checkpoints are cleared.
-- `--no-repair-embeddings`: disable automatic repair of missing embeddings during ingest (enabled by default).
-- `--compact-every`: run compaction every N ingested emails (default: 20000). Set to `0` to disable periodic compaction; a final compaction still runs after ingest.
-
-Example:
-```bash
-ragmail pipeline --workspace test-sample --stages ingest \
-  --ingest-batch-size 500 \
-  --embedding-batch-size 128 \
-  --chunk-size 2000 \
-  --chunk-overlap 0
-```
-These flags also work with `ragmail pipeline`.
-
-## Search + Query Planning
-
-- Hybrid search uses vector similarity plus full-text search (subject, body, sender, recipients, labels).
-- FTS index is created during ingest and auto-rebuilt if corruption is detected.
-
-Examples:
-```bash
-# Pure search
-ragmail search "who is Amy Smith" --workspace 2026
-
-# Structured planning with LLM (JSON-only plan)
-ragmail search --plan "how many emails from Anthropic in January 2026" --workspace 2026
-
-# RAG answers also enable the planner by default
-ragmail search --rag "summarize my discussions with Sarah about the budget" --workspace 2026
-```
-
-## Maintenance
-
-```bash
-# Check for duplicate IDs (emails + chunks)
-ragmail stats --dupes --workspace my-workspace
-
-# Remove duplicates (rebuilds FTS index after emails)
-ragmail dedupe --workspace my-workspace
-```
-
-## Agent Skills (Codex/Claude)
-
-Agent skills are a first-class, supported way to query the LanceDB workspaces. This repo includes the `ragmail` skill under `.agents/skills/ragmail` with a scripted query helper for fast, repeatable answers. Keep the skill updated if schemas, indexing, or workspace layout change.
-
-Examples to ask an agent:
-- "How many times did Bob email me in Feb 2026?"
-- "How much did the house painting I did last summer cost?"
-- "Who is Arkin's teacher?"
-
-Usage notes:
-- Run from repo root and specify a workspace name or db path.
-- Convert relative dates to explicit ranges before querying.
-- If your agent expects skills in a different directory, configure it to load `.agents/skills`.
-
-## Ignore Lists
-
-```bash
-# Create an ignore list template
-ragmail ignore init /tmp/ignore.json
-
-# Apply ignore list rules
-ragmail ignore apply test-sample.clean.jsonl --ignore-list /tmp/ignore.json
-```
-
-## Packaging
-
-Create a portable source tarball (no data/caches/workspaces):
-
-```bash
-make package
-```
-
-If you want to include local uncommitted changes, use:
-```bash
-make package-dev
-```
-## Docs
-
-See `docs/` for detailed documentation.
-For AI agents, `ai-state.md` is the compact, machine-friendly repo briefing.
+## More Docs
+- Pipeline deep dive: [`docs/pipeline.md`](docs/pipeline.md)
+- High-level design: [`docs/DESIGN.md`](docs/DESIGN.md)
+- Developer guide: [`docs/developers.md`](docs/developers.md)
+- Release process: [`docs/release.md`](docs/release.md)
+- Usage examples: [`docs/examples.md`](docs/examples.md)
+- Prompt details: [`docs/prompts.md`](docs/prompts.md)

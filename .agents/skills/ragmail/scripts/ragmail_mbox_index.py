@@ -2,7 +2,7 @@
 import sys
 
 print(
-    "Deprecated: use `ragmail pipeline --stages index --workspace <name>`.",
+    "Deprecated: use `ragmail pipeline --stages preprocess --workspace <name>`.",
     file=sys.stderr,
 )
 sys.exit(1)

@@ -1,0 +1,24 @@
+[package]
+name = "ragmail-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "ragmail-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+ragmail-index = { path = "../ragmail-index" }
+ragmail-mbox = { path = "../ragmail-mbox" }
+ragmail-clean = { path = "../ragmail-clean" }
+ragmail-core = { path = "../ragmail-core" }
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

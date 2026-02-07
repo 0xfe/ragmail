@@ -1,6 +1,7 @@
 private/
 email_search.lancedb
 workspaces
+bench-workspaces
 dist
 .ragmail-cache
 .uv-cache
@@ -24,3 +25,4 @@ htmlcov
 build
 .DS_Store
 .venv
+rust/target
