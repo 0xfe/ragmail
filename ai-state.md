@@ -28,7 +28,14 @@ Purpose: compact AI handoff. Update whenever CLI contracts, stage ownership, wor
   - Vectorize emits startup heartbeat progress while embedding provider initialization is in-flight.
 
 ## CLI boundary details
-- Rust pipeline command in `rust/ragmail-cli/src/main.rs`.
+- Rust pipeline command entrypoint in `rust/ragmail-cli/src/main.rs`.
+- Rust CLI internals are now split across cohesive modules:
+  - `rust/ragmail-cli/src/display.rs` (live stage UI + pipeline header/summary rendering)
+  - `rust/ragmail-cli/src/file_ops.rs` (stage parsing, checkpoint/file collection, counters, index-part merge)
+  - `rust/ragmail-cli/src/logging.rs` (pipeline/stage log writing)
+  - `rust/ragmail-cli/src/python_bridge.rs` (bridge command resolution, streaming JSON protocol, retry policy)
+  - `rust/ragmail-cli/src/util.rs` (shared helpers)
+  - `rust/ragmail-cli/src/tests.rs` (CLI unit/integration-style tests)
 - Rust bridge execution order:
   - `RAGMAIL_PY_BRIDGE_BIN` override if set
   - sibling `ragmail-py` next to `ragmail`
@@ -88,8 +95,26 @@ Purpose: compact AI handoff. Update whenever CLI contracts, stage ownership, wor
 - CI release workflow builds per-platform Rust + PyInstaller bridge binaries.
 
 ## Key files touched by harness migration
-- Rust CLI: `rust/ragmail-cli/src/main.rs`
-- Workspace refresh/state: `rust/ragmail-core/src/workspace.rs`
+- Rust CLI entry + modules:
+  - `rust/ragmail-cli/src/main.rs`
+  - `rust/ragmail-cli/src/display.rs`
+  - `rust/ragmail-cli/src/file_ops.rs`
+  - `rust/ragmail-cli/src/logging.rs`
+  - `rust/ragmail-cli/src/python_bridge.rs`
+  - `rust/ragmail-cli/src/util.rs`
+- Workspace refresh/state: `rust/ragmail-core/src/workspace/mod.rs`
+- Rust stage/shared modules:
+  - `rust/ragmail-core/src/stage.rs`
+  - `rust/ragmail-clean/src/pipeline.rs`
+  - `rust/ragmail-clean/src/header.rs`
+  - `rust/ragmail-clean/src/mime.rs`
+  - `rust/ragmail-clean/src/text.rs`
+  - `rust/ragmail-clean/src/codec.rs`
+  - `rust/ragmail-mbox/src/split.rs`
+  - `rust/ragmail-mbox/src/stream.rs`
+  - `rust/ragmail-index/src/build.rs`
+  - `rust/ragmail-index/src/record.rs`
+  - `rust/ragmail-index/src/query.rs`
 - Rust crate bin name/version: `rust/ragmail-cli/Cargo.toml`, `rust/Cargo.toml`
 - Python bridge commands: `python/lib/ragmail/cli.py`
 - Python Rust binary resolution compatibility: `python/lib/ragmail/pipeline.py`
