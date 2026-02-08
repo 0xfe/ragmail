@@ -2,7 +2,7 @@
 
 Purpose: compact AI handoff. Update whenever CLI contracts, stage ownership, workspace schema, or release tooling changes.
 
-Snapshot (2026-02-07)
+Snapshot (2026-02-08)
 - Branch: `rust-migration`
 - Rust toolchain target: `1.93.0`
 - Python project root: `python/`
@@ -73,9 +73,17 @@ Snapshot (2026-02-07)
 ## Release contracts
 - Version source of truth: root `VERSION`
 - Release artifacts default output dir: `releases/`
+- Local artifact build entrypoint: `just release <platform>` (`platform` default `host`)
+- Supported local platform tokens:
+  - `host`
+  - `macos/amd64`, `macos/arm64`
+  - `linux/amd64`, `linux/arm64`
+- Maintainer cut command: `just release-cut <platform>` (`release-check` + build + `release-tag`)
 - Tarballs include both binaries:
   - `ragmail`
   - `ragmail-py`
+- Artifact build script runs a best-effort local runtime smoke probe (`ragmail version` + `ragmail search --help`) before packaging.
+- Cross-platform local requests are rejected (PyInstaller bridge must be built on target OS/arch); use matching host or CI matrix.
 - Linux package name/file pattern: `ragmail_<version>_<arch>.deb`
 - Homebrew formula filename/class:
   - `ragmail.rb`
@@ -104,6 +112,7 @@ Snapshot (2026-02-07)
 - `just lint` -> pass
 - `just test-all` -> pass (`118 passed, 6 skipped` Python; all Rust tests green)
 - `./just.d/scripts/release-ci-dry-run.sh` -> pass
+- `just release host` -> pass (artifact + `SHA256SUMS`; passthrough smoke can warn under restricted sandboxes)
 - Additional post-UX checks:
   - `cargo test -p ragmail-cli` -> pass
   - `cargo clippy -p ragmail-cli -- -D warnings` -> pass

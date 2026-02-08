@@ -221,14 +221,20 @@ just bump-patch
 # Run release checks
 just release-check
 
-# Build local artifacts
-just release-artifacts
+# Build self-sufficient local distribution
+just release host
+
+# Build a specific target (must run on matching OS/arch host)
+just release linux/amd64
 
 # Optional local release smoke
 just release-smoke
 
 # Create annotated version tag
-just release
+just release-tag
+
+# One-shot maintainer cut (check + build + tag)
+just release-cut host
 ```
 
 Additional release docs:

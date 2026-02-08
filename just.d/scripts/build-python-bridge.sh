@@ -48,8 +48,10 @@ spec_dir="${build_root}/spec"
 entry_script="${repo_root}/python/scripts/pyinstaller_entry.py"
 
 rm -rf "${build_root}"
-mkdir -p "${dist_dir}" "${work_dir}" "${spec_dir}" "${output_dir}"
+cache_dir="${build_root}/cache"
+mkdir -p "${dist_dir}" "${work_dir}" "${spec_dir}" "${cache_dir}" "${output_dir}"
 
+PYINSTALLER_CONFIG_DIR="${cache_dir}" \
 PYTHONPATH="${repo_root}/python/lib" "${venv_python}" -m PyInstaller \
   --noconfirm \
   --clean \

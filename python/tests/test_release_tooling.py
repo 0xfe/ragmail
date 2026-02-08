@@ -27,6 +27,23 @@ def test_release_workflow_has_expected_distribution_matrix() -> None:
     assert "publish-homebrew-tap.sh" in workflow
 
 
+def test_local_release_recipes_support_platform_targets() -> None:
+    release_recipes = (REPO_ROOT / "just.d/50-release.just").read_text(encoding="utf-8")
+    assert "release-artifacts platform='host':" in release_recipes
+    assert "release platform='host':" in release_recipes
+    assert "just release-artifacts {{platform}}" in release_recipes
+    assert "release-cut platform='host':" in release_recipes
+
+
+def test_build_release_artifacts_script_accepts_platform_argument() -> None:
+    script = (REPO_ROOT / "just.d/scripts/build-release-artifacts.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "--platform" in script
+    assert "canonicalize_platform" in script
+    assert "cross-platform build requested" in script
+
+
 def test_ci_workflow_has_benchmark_smoke_gate() -> None:
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "benchmark-smoke:" in workflow

@@ -30,9 +30,10 @@ case "${host_triple}" in
 esac
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "${tmp_dir}"' EXIT
+extract_dir="$(mktemp -d)"
+trap 'rm -rf "${tmp_dir}" "${extract_dir}"' EXIT
 
-./just.d/scripts/build-release-artifacts.sh --output-dir "${tmp_dir}" --version "${version}" --host-triple "${host_triple}"
+./just.d/scripts/build-release-artifacts.sh --output-dir "${tmp_dir}" --version "${version}" --platform host
 
 tarball="ragmail-v${version}-${suffix}.tar.gz"
 if [[ ! -f "${tmp_dir}/${tarball}" ]]; then
@@ -47,6 +48,16 @@ fi
 
 if ! grep -q " ${tarball}$" "${tmp_dir}/SHA256SUMS"; then
   echo "checksum missing entry for ${tarball}" >&2
+  exit 1
+fi
+
+tar -C "${extract_dir}" -xzf "${tmp_dir}/${tarball}"
+if ! "${extract_dir}/ragmail" version >/dev/null 2>&1; then
+  echo "release smoke failed: extracted ragmail binary did not run" >&2
+  exit 1
+fi
+if ! "${extract_dir}/ragmail" search --help >/dev/null 2>&1; then
+  echo "release smoke failed: extracted ragmail could not reach bundled ragmail-py" >&2
   exit 1
 fi
 

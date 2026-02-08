@@ -2,7 +2,39 @@
 
 This repo uses `VERSION` as the source of truth for Rust and Python versions.
 
-## Local release flow
+## Build a runnable distribution (local)
+
+Primary command:
+
+```bash
+just release <os/arch>
+```
+
+Examples:
+
+```bash
+# Build for current machine
+just release host
+
+# Explicit target spelling
+just release macos/arm64
+just release macos/amd64
+just release linux/arm64
+just release linux/amd64
+```
+
+Behavior:
+- Builds `ragmail` (Rust) and `ragmail-py` (PyInstaller bridge).
+- Runs a best-effort local runtime smoke probe before packaging (disable with `RAGMAIL_RELEASE_RUNTIME_SMOKE=0`).
+- Writes artifacts to `releases/` by default.
+- Produces `SHA256SUMS`.
+- Produces Linux `.deb` on Linux hosts when `dpkg-deb` is available.
+
+Important:
+- `ragmail-py` must be built on the target OS/arch.
+- Cross-platform requests from a non-matching host fail with a clear remediation message.
+
+## Maintainer release flow (checks + tag)
 
 1. Ensure your tree is clean.
 2. Run release checks:
@@ -18,13 +50,23 @@ Checks include:
 - release binary build and binary version match (`ragmail version == VERSION`)
 - PyInstaller bridge build and version match (`ragmail-py --version` matches `VERSION`)
 
-3. Build host artifacts:
+3. Build artifacts:
 
 ```bash
-just release-artifacts
+just release host
 ```
 
-Artifacts are written to `releases/` by default.
+4. Tag release:
+
+```bash
+just release-tag
+```
+
+Or run all three in order:
+
+```bash
+just release-cut host
+```
 
 Optional local smoke validation (artifact naming/checksum/formula path):
 
@@ -36,18 +78,6 @@ Optional local CI-equivalent dry run (release publish + tap update using a tempo
 
 ```bash
 just release-ci-dry-run
-```
-
-4. Tag release:
-
-```bash
-just release-tag
-```
-
-Or run all in order:
-
-```bash
-just release
 ```
 
 ## Version bump

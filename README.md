@@ -10,7 +10,7 @@ RAGmail lets you search and analyze your email with your favourite agent (Claude
 Typical questions you can answer:
 
 - "What did we decide about the school trip budget?"
-- "Where all did I travel to in in 2006?"
+- "Where all did I travel to in 2006?"
 - "How many times did Bob email me in February 2026?"
 
 ## How it works
@@ -19,7 +19,7 @@ Typical questions you can answer:
 a database indexed for both full-text and semantic search.
 
 Cleaning involves things like removing bulk mail, stripping headers, signatures, attachments, and other unnecessary
-elements, normailizing and tagging common fields, and a host of other things.
+elements, normalizing and tagging common fields, and a host of other things.
 
 After messages are cleaned, `RAGmail` generates embedding vectors for the subject and body of each message, and
 then ingests everything into a vector database, with pointers to the original email for further analysis.
@@ -96,7 +96,6 @@ ragmail pipeline --workspace my-mail --stages ingest
 ```
 
 ## Analyzing your email
-k
 
 
 ## Prerequisites
@@ -111,6 +110,15 @@ Recommended:
 Optional for release maintainers:
 
 - `dpkg-deb` for Linux `.deb` packaging
+
+Release artifact quickstart:
+```bash
+# Build a self-sufficient distribution for your host machine
+just release host
+
+# Build a specific platform (must run on matching OS/arch host)
+just release linux/amd64
+```
 
 ## Usage Instructions
 
