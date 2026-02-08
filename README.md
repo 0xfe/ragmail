@@ -36,6 +36,16 @@ with [Google Takeout](https://takeout.google.com/).
 ### Download and Build `RAGmail`
 
 ```bash
+# Install just
+brew install just  # on mac
+apt install just   # on ubuntu/debain linux
+
+# Install uv and rust
+curl -LsSf https://astral.sh/uv/install.sh | less
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Make sure all your env vars (like PATH) are set, and start a new shell
+
 # Clone this repo
 git clone <this repo>
 cd ragmail
@@ -71,7 +81,7 @@ ragmail pipeline ~/private/all-emails.mbox --workspace my-mail --stages split,pr
 
 # Local: zip up the preprocessed mail and send to remote host
 tar -czf my-mail-clean.tar.gz workspaces/my-mail/clean
-rsync -av my-mail-clean.tar.gz user@host:/tmp
+scp my-mail-clean.tar.gz user@host:/tmp
 
 # On the remote host, make sure ragmail is installed and you have a venv. Then unpack the tarball,
 # and run the vectorize stage to create the embeddings, and package them up again.
@@ -82,7 +92,7 @@ ragmail pipeline --workspace my-mail --stages vectorize
 tar -czf /tmp/my-mail-embeddings.tar.gz workspaces/my-mail/embeddings
 
 # Back on the local machine, fetch the embeddings and unpack them
-rsync -av user@host:/tmp/my-mail-embeddings.tar.gz .
+scp user@host:/tmp/my-mail-embeddings.tar.gz .
 tar -xzf my-mail-embeddings.tar.gz -C workspaces/my-mail
 
 # Local: ingest the embeddings
