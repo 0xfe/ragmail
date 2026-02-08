@@ -1,5 +1,5 @@
 bench-pipeline *args:
-  ./just.d/scripts/run-python.sh ./just.d/scripts/benchmark_pipeline.py {{args}}
+  {{repo_root}}/just.d/scripts/run-python.sh {{repo_root}}/just.d/scripts/benchmark_pipeline.py {{args}}
 
 bench-threshold *args:
-  ./just.d/scripts/run-python.sh ./just.d/scripts/benchmark_threshold.py {{args}}
+  {{repo_root}}/just.d/scripts/run-python.sh {{repo_root}}/just.d/scripts/benchmark_threshold.py {{args}}

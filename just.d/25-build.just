@@ -8,4 +8,4 @@ build-rust-release:
   cargo build --manifest-path {{rust_manifest}} --release -p ragmail-cli
 
 build-release-artifacts *args:
-  ./just.d/scripts/build-release-artifacts.sh {{args}}
+  {{repo_root}}/just.d/scripts/build-release-artifacts.sh {{args}}

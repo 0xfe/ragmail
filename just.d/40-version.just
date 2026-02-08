@@ -1,8 +1,8 @@
 version:
-  @cat VERSION
+  @cat {{repo_root}}/VERSION
 
 sync-version:
-  ./just.d/scripts/sync-version.sh
+  {{repo_root}}/just.d/scripts/sync-version.sh
 
 bump-patch:
-  ./just.d/scripts/bump-patch.sh
+  {{repo_root}}/just.d/scripts/bump-patch.sh

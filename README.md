@@ -2,16 +2,16 @@
 
 ## About
 
-I have about 22 years of e-mail in Gmail, and another 10 years of it my archives. I built this tool
-so I could do some local analysis on my email.
-
 RAGmail lets you search and analyze your email with your favourite agent (Claude, Codex, etc.)
 
 Typical questions you can answer:
 
-- "What did we decide about the school trip budget?"
-- "Where all did I travel to in 2006?"
-- "How many times did Bob email me in February 2026?"
+- "_What did we decide about the school trip budget?_"
+- "_Where all did I travel to in 2006?_"
+- "_How many times did Bob email me in February 2026?_"
+
+I have about 22 years of e-mail in Gmail, and another 10 years of it my archives. I built this tool
+so I could do some local analysis on my email.
 
 ## How it works
 
@@ -53,7 +53,7 @@ This is the simplest way to get started, but it will be slow if you have a large
 
 ```bash
 # Run full pipeline (model,split,preprocess,vectorize,ingest)
-ragmail pipeline private/gmail-2015.mbox --workspace my-mail
+ragmail pipeline ~/private/all-emails.mbox --workspace my-mail
 
 # Search your workspace
 ragmail search "meeting tomorrow" --workspace my-mail
@@ -63,11 +63,11 @@ ragmail search "meeting tomorrow" --workspace my-mail
 
 This approach is much faster (10 - 100x) if you have a large mailbox. Here you run the compute-intensive parts of the pipeline on a remote GPU.
 
-For example, you can quickly spin up an L4 instance on GCP for this purpose, which for a 15GB mailbox (about 200k messages) would take less than 30 minutes and cost about $3.
+For example, you can quickly spin up an L4 instance on GCP for this purpose, which for a 15GB mailbox (about 200k messages) would take less than 30 minutes and cost about $0.50 USD.
 
 ```bash
 # Local: run the initial stages only
-ragmail pipeline private/gmail-2015.mbox --workspace my-mail --stages split,preprocess
+ragmail pipeline ~/private/all-emails.mbox --workspace my-mail --stages split,preprocess
 
 # Local: zip up the preprocessed mail and send to remote host
 tar -czf my-mail-clean.tar.gz workspaces/my-mail/clean
@@ -109,8 +109,6 @@ Claude is ready. Type your questions below.
 Required:
 - `python` 3.11+
 - Rust toolchain 1.93.0+ (`rustc`, `cargo`, `rustfmt`, `clippy`)
-
-Recommended:
 - `uv` for Python dependency and environment management
 - `just` for common build/test/release commands
 
