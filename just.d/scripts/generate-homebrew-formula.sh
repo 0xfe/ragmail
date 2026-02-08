@@ -8,7 +8,7 @@ usage: generate-homebrew-formula.sh \
   --repo owner/repo \
   --macos-amd64-sha SHA256 \
   --macos-arm64-sha SHA256 \
-  --output /path/ragmail-rs.rb
+  --output /path/ragmail.rb
 EOF
 }
 
@@ -67,7 +67,7 @@ macos_arm64_url="https://github.com/${repo}/releases/download/v${version}/ragmai
 
 mkdir -p "$(dirname "${output}")"
 cat > "${output}" <<EOF
-class RagmailRs < Formula
+class Ragmail < Formula
   desc "Rust-first high-throughput pipeline for ragmail"
   homepage "https://github.com/${repo}"
   version "${version}"
@@ -84,11 +84,12 @@ class RagmailRs < Formula
   end
 
   def install
-    bin.install "ragmail-rs"
+    bin.install "ragmail"
+    bin.install "ragmail-py"
   end
 
   test do
-    assert_match version.to_s, shell_output("\#{bin}/ragmail-rs version")
+    assert_match version.to_s, shell_output("\#{bin}/ragmail version")
   end
 end
 EOF

@@ -211,12 +211,11 @@ impl Workspace {
             self.archive_dir(&self.split_dir(), "split", &archive_root)?;
             remove_path_if_exists(&self.checkpoints_dir().join("split-rs"))?;
         }
-        if stages.contains("index") {
+        if stages.contains("preprocess") || stages.contains("index") || stages.contains("clean") {
             remove_file_if_exists(&self.split_dir().join("mbox_index.jsonl"))?;
             remove_file_if_exists(&self.checkpoints_dir().join("mbox_index.checkpoint.json"))?;
             remove_path_if_exists(&self.checkpoints_dir().join("mbox_index-rs"))?;
-        }
-        if stages.contains("clean") {
+            remove_path_if_exists(&self.checkpoints_dir().join("preprocess-rs"))?;
             self.archive_dir(&self.clean_dir(), "clean", &archive_root)?;
             self.archive_dir(&self.spam_dir(), "spam", &archive_root)?;
             self.archive_dir(&self.reports_dir(), "reports", &archive_root)?;
@@ -230,6 +229,10 @@ impl Workspace {
         {
             for stage in stages {
                 stages_obj.remove(stage);
+                if stage == "preprocess" {
+                    stages_obj.remove("index");
+                    stages_obj.remove("clean");
+                }
             }
         }
         self.save_state(state)
@@ -350,12 +353,13 @@ mod tests {
         fs::write(ws.reports_dir().join("2024-01.mbox.summary"), b"summary").expect("write rep");
         fs::write(ws.split_dir().join("mbox_index.jsonl"), b"{}\n").expect("write index");
         fs::create_dir_all(ws.checkpoints_dir().join("split-rs")).expect("mkdir split-rs");
-        fs::create_dir_all(ws.checkpoints_dir().join("mbox_index-rs")).expect("mkdir index-rs");
+        fs::create_dir_all(ws.checkpoints_dir().join("preprocess-rs"))
+            .expect("mkdir preprocess-rs");
         ws.update_stage("split", "done", None).expect("split state");
-        ws.update_stage("index", "done", None).expect("index state");
-        ws.update_stage("clean", "done", None).expect("clean state");
+        ws.update_stage("preprocess", "done", None)
+            .expect("preprocess state");
 
-        let stages = ["split", "index", "clean"]
+        let stages = ["split", "preprocess"]
             .into_iter()
             .map(str::to_string)
             .collect();
@@ -363,7 +367,7 @@ mod tests {
 
         assert!(!ws.split_dir().join("mbox_index.jsonl").exists());
         assert!(!ws.checkpoints_dir().join("split-rs").exists());
-        assert!(!ws.checkpoints_dir().join("mbox_index-rs").exists());
+        assert!(!ws.checkpoints_dir().join("preprocess-rs").exists());
         assert!(ws.split_dir().exists());
         assert!(ws.clean_dir().exists());
         assert!(ws.spam_dir().exists());
@@ -375,8 +379,7 @@ mod tests {
         assert!(old_entries >= 1);
 
         assert!(!ws.stage_done("split").expect("split done"));
-        assert!(!ws.stage_done("index").expect("index done"));
-        assert!(!ws.stage_done("clean").expect("clean done"));
+        assert!(!ws.stage_done("preprocess").expect("preprocess done"));
         let _ = fs::remove_dir_all(&ws.root);
     }
 }

@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 usage: release-publish-assets.sh --version X.Y.Z --repo owner/repo --artifacts-dir /path/to/artifacts --output-dir /path/to/output
 
-Collects release artifacts, writes SHA256SUMS, and generates ragmail-rs.rb.
+Collects release artifacts, writes SHA256SUMS, and generates ragmail.rb.
 EOF
 }
 
@@ -86,6 +86,6 @@ macos_arm64_sha="$(shasum -a 256 "${output_dir}/flat/${macos_arm64}" | awk '{pri
   --repo "${repo}" \
   --macos-amd64-sha "${macos_amd64_sha}" \
   --macos-arm64-sha "${macos_arm64_sha}" \
-  --output "${output_dir}/homebrew/ragmail-rs.rb"
+  --output "${output_dir}/homebrew/ragmail.rb"
 
 echo "Prepared release publish artifacts in ${output_dir}"

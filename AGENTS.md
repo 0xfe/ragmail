@@ -12,6 +12,8 @@ ragmail/
 │   ├── tests/            # Python test suite
 │   ├── pyproject.toml
 │   └── uv.lock
+├── rust/                 # Rust workspace (CLI + split/preprocess/core crates)
+├── just.d/               # Build/test/release helper scripts
 ├── docs/                 # Documentation
 ├── private/              # Private email data (gitignored)
 │   └── gmail-*.mbox
@@ -137,9 +139,9 @@ Filter low-value content:
 ## Running the Pipeline
 
 ```bash
-uv venv
+# One-step bootstrap (Python env + Rust build + .venv/bin/ragmail link)
+just bootstrap
 source .venv/bin/activate
-UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --project python
 
 # Create a distributed sample
 UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python -m ragmail.sample.sampler private/gmail-*.mbox --distributed --emails-per-file 100 -o test-sample.mbox

@@ -13,32 +13,31 @@ It is written for technical users and developers.
 ## Architecture Overview
 
 ragmail has two runtimes:
-- Rust runtime for `split`, `index`, and `clean`.
-- Python runtime for `download`, `vectorize`, `ingest`, and user-facing search/API layers.
+- Rust runtime for orchestration and MBOX-heavy stages.
+- Python runtime only for model warmup, vectorization, ingest, and search/API layers.
 
 Primary entrypoint:
 - `ragmail pipeline ... --workspace <name>`
 
-The Python CLI orchestrates all stages.
-For Rust stages, Python shells out to Rust commands.
+The Rust CLI is the public harness entrypoint.
+Rust calls Python bridge commands only for Python-owned stages.
 
 ## Stage Ownership
 
 | Stage | Owner | Why |
 |---|---|---|
-| `download` | Python | dependency/cache prep logic |
+| `model` | Python (via Rust bridge) | dependency/cache prep logic |
 | `split` | Rust | streaming + checkpointed MBOX partitioning |
-| `index` | Rust | fast byte-offset index build |
-| `clean` | Rust | high-throughput parsing/cleaning/filtering |
-| `vectorize` | Python | embedding models + Python ML ecosystem |
-| `ingest` | Python | LanceDB ingest, compaction, FTS operations |
+| `preprocess` | Rust | parse/clean/filter and emit `mbox_index.jsonl` in one pass |
+| `vectorize` | Python (via Rust bridge) | embedding models + Python ML ecosystem |
+| `ingest` | Python (via Rust bridge) | LanceDB ingest, compaction, FTS operations |
 
 ## Data Flow
 
 1. Input MBOX files are linked into workspace `inputs/`.
 2. Rust `split` emits month-partitioned MBOX files.
-3. Rust `index` emits `mbox_index.jsonl` for raw-byte lookups.
-4. Rust `clean` emits structured `clean/*.clean.jsonl` and `spam/*.spam.jsonl`.
+3. Rust `preprocess` emits structured `clean/*.clean.jsonl` and `spam/*.spam.jsonl`.
+4. Rust `preprocess` also emits `split/mbox_index.jsonl` for raw-byte lookups.
 5. Python `vectorize` emits embedding stores (`embeddings/*.embed.db`).
 6. Python `ingest` writes normalized records into LanceDB.
 
@@ -78,17 +77,16 @@ This supports:
 - `mbox_index.jsonl` format remains stable for message lookup.
 - Clean JSONL schema remains stable for vectorize/ingest/search.
 - Stage outputs are isolated by workspace.
+- `ragmail` binary is always the entrypoint in source and release builds.
 
 ## Rust-Python Boundary
 
-Python to Rust boundary:
-- Python pipeline invokes Rust stage commands.
-- Python can use `RAGMAIL_RS_BIN` to point at a prebuilt Rust binary.
-
 Rust to Python boundary:
 - Rust orchestrator can call Python bridge commands:
+  - `ragmail py model`
   - `ragmail py vectorize`
   - `ragmail py ingest`
+- Rust forwards non-Rust subcommands (`search`, `stats`, `serve`, etc.) to `ragmail-py`.
 
 This boundary keeps heavy MBOX processing in Rust while preserving Python ML integrations.
 
@@ -105,7 +103,7 @@ You can route this backend to hosted or local servers.
 ## Performance Model
 
 Largest wins come from:
-- Rust streaming stages (`split`, `index`, `clean`).
+- Rust streaming stages (`split`, `preprocess`).
 - Running `vectorize` on GPUs.
 - Stage-only reruns using `--stages` and `--refresh`.
 

@@ -15,7 +15,7 @@ ragmail/
 │   └── pytest.ini
 ├── rust/
 │   ├── Cargo.toml             # Rust workspace manifest
-│   ├── ragmail-cli/           # Rust CLI binary (ragmail-rs)
+│   ├── ragmail-cli/           # Rust CLI binary (ragmail)
 │   ├── ragmail-core/          # Workspace/state contracts
 │   ├── ragmail-mbox/          # Streaming MBOX + split
 │   ├── ragmail-index/         # Byte-offset index builder
@@ -53,6 +53,7 @@ source .venv/bin/activate
 `just bootstrap` performs both:
 - Python environment bootstrap into root `.venv`
 - Rust workspace build (`cargo build --workspace`)
+- Symlink `.venv/bin/ragmail` to `rust/target/debug/ragmail`
 
 Implementation detail:
 - Python bootstrap logic is in `just.d/scripts/bootstrap-python.sh`.
@@ -93,7 +94,7 @@ just test-all
 # Rust debug build
 just build-rust
 
-# Rust release build (ragmail-rs)
+# Rust release build (ragmail)
 just build-rust-release
 
 # Print current version from VERSION
@@ -176,7 +177,7 @@ ragmail pipeline --workspace debug --stages preprocess,vectorize,ingest --refres
 ## Force Python to use a prebuilt Rust binary
 ```bash
 # Avoid cargo run overhead during repeated tests
-export RAGMAIL_RS_BIN="$PWD/rust/target/debug/ragmail-rs"
+export RAGMAIL_BIN="$PWD/rust/target/debug/ragmail"
 
 # Run pipeline normally; Python will call this binary
 ragmail pipeline private/gmail-2015.mbox --workspace debug

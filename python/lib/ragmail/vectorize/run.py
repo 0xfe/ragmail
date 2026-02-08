@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, Callable
+import threading
 import time
 
 from ragmail.common import signals
@@ -60,11 +61,48 @@ def vectorize_files(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    embedding_provider = create_embedding_provider(
-        settings.embedding_provider,
-        model_name=settings.embedding_model,
-        model_revision=settings.embedding_model_revision,
-    )
+    processed = 0
+    last_progress_time = time.monotonic()
+    progress_interval = 0.1
+    progress_step = 25
+    startup_interval = 0.5
+
+    # Emit startup heartbeat while embedding provider initialization blocks.
+    startup_text = "loading embedding model"
+    startup_stop = threading.Event()
+    startup_thread: threading.Thread | None = None
+    startup_started = time.monotonic()
+    if progress_callback:
+        progress_callback({"processed": processed, "startup_text": startup_text})
+
+        def _startup_heartbeat() -> None:
+            while not startup_stop.wait(startup_interval):
+                progress_callback(
+                    {
+                        "processed": processed,
+                        "startup_text": startup_text,
+                        "elapsed_s": max(0.0, time.monotonic() - startup_started),
+                    }
+                )
+
+        startup_thread = threading.Thread(target=_startup_heartbeat, daemon=True)
+        startup_thread.start()
+
+    try:
+        embedding_provider = create_embedding_provider(
+            settings.embedding_provider,
+            model_name=settings.embedding_model,
+            model_revision=settings.embedding_model_revision,
+        )
+    finally:
+        if startup_thread is not None:
+            startup_stop.set()
+            startup_thread.join(timeout=1.0)
+
+    if progress_callback:
+        progress_callback(
+            {"processed": processed, "startup_text": "preparing vectorization pipeline"}
+        )
 
     pipeline = IngestPipeline(
         checkpoint_dir=checkpoint_dir,
@@ -72,18 +110,13 @@ def vectorize_files(
         errors_path=errors_path,
     )
 
-    processed = 0
-    last_progress_time = time.monotonic()
-    progress_interval = 0.1
-    progress_step = 25
-
     def _maybe_emit_progress(force: bool = False):
         nonlocal last_progress_time
         if not progress_callback:
             return
         now = time.monotonic()
         if force or (now - last_progress_time) >= progress_interval or (processed % progress_step == 0):
-            progress_callback({"processed": processed})
+            progress_callback({"processed": processed, "startup_text": ""})
             last_progress_time = now
 
     def _check_interrupt():
@@ -116,6 +149,11 @@ def vectorize_files(
         ):
             _check_interrupt()
             batch.append(email)
+            if progress_callback and processed == 0:
+                now = time.monotonic()
+                if (now - last_progress_time) >= startup_interval:
+                    progress_callback({"processed": 0, "startup_text": "building first batch"})
+                    last_progress_time = now
 
             if len(batch) >= effective_vectorize_batch_size:
                 _check_interrupt()

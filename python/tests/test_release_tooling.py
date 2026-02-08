@@ -17,12 +17,12 @@ def test_release_workflow_has_expected_distribution_matrix() -> None:
     assert "target: x86_64-unknown-linux-gnu" in workflow
     assert "suffix: linux-arm64" in workflow
     assert "target: aarch64-unknown-linux-gnu" in workflow
-    assert "cross_compile: \"true\"" in workflow
-    assert "gcc-aarch64-linux-gnu" in workflow
+    assert "os: ubuntu-24.04-arm" in workflow
     assert "os: macos-13" in workflow
     assert "suffix: macos-amd64" in workflow
     assert "os: macos-14" in workflow
     assert "suffix: macos-arm64" in workflow
+    assert "build-python-bridge.sh" in workflow
     assert "release-publish-assets.sh" in workflow
     assert "publish-homebrew-tap.sh" in workflow
 
@@ -36,7 +36,7 @@ def test_ci_workflow_has_benchmark_smoke_gate() -> None:
 
 def test_generate_homebrew_formula_script_emits_expected_fields(tmp_path: Path) -> None:
     script = REPO_ROOT / "just.d/scripts/generate-homebrew-formula.sh"
-    output = tmp_path / "ragmail-rs.rb"
+    output = tmp_path / "ragmail.rb"
     version = "0.1.0"
     repo = "example/ragmail"
     sha_amd64 = "1" * 64
@@ -61,7 +61,7 @@ def test_generate_homebrew_formula_script_emits_expected_fields(tmp_path: Path) 
     )
 
     formula = output.read_text(encoding="utf-8")
-    assert "class RagmailRs < Formula" in formula
+    assert "class Ragmail < Formula" in formula
     assert f'version "{version}"' in formula
     assert f"https://github.com/{repo}/releases/download/v{version}/ragmail-v{version}-macos-amd64.tar.gz" in formula
     assert f"https://github.com/{repo}/releases/download/v{version}/ragmail-v{version}-macos-arm64.tar.gz" in formula
@@ -75,16 +75,19 @@ def test_release_publish_assets_script_collects_checksums_and_formula(tmp_path: 
     artifacts.mkdir()
     version = "0.1.0"
 
-    # Create expected tarballs with a dummy ragmail-rs payload.
+    # Create expected tarballs with dummy ragmail + ragmail-py payloads.
     for suffix in ("macos-amd64", "macos-arm64", "linux-amd64", "linux-arm64"):
         tar_path = artifacts / f"ragmail-v{version}-{suffix}.tar.gz"
-        payload = tmp_path / f"ragmail-rs-{suffix}"
+        payload = tmp_path / f"ragmail-{suffix}"
+        bridge_payload = tmp_path / f"ragmail-py-{suffix}"
         payload.write_text("dummy", encoding="utf-8")
+        bridge_payload.write_text("bridge", encoding="utf-8")
         with tarfile.open(tar_path, mode="w:gz") as tf:
-            tf.add(payload, arcname="ragmail-rs")
+            tf.add(payload, arcname="ragmail")
+            tf.add(bridge_payload, arcname="ragmail-py")
 
-    (artifacts / f"ragmail-rs_{version}_amd64.deb").write_bytes(b"deb-amd64")
-    (artifacts / f"ragmail-rs_{version}_arm64.deb").write_bytes(b"deb-arm64")
+    (artifacts / f"ragmail_{version}_amd64.deb").write_bytes(b"deb-amd64")
+    (artifacts / f"ragmail_{version}_arm64.deb").write_bytes(b"deb-arm64")
 
     output = tmp_path / "publish"
     subprocess.run(
@@ -108,19 +111,19 @@ def test_release_publish_assets_script_collects_checksums_and_formula(tmp_path: 
     assert f"ragmail-v{version}-macos-arm64.tar.gz" in checksums
     assert f"ragmail-v{version}-linux-amd64.tar.gz" in checksums
     assert f"ragmail-v{version}-linux-arm64.tar.gz" in checksums
-    assert f"ragmail-rs_{version}_amd64.deb" in checksums
-    assert f"ragmail-rs_{version}_arm64.deb" in checksums
+    assert f"ragmail_{version}_amd64.deb" in checksums
+    assert f"ragmail_{version}_arm64.deb" in checksums
 
-    formula = (output / "homebrew" / "ragmail-rs.rb").read_text(encoding="utf-8")
-    assert "class RagmailRs < Formula" in formula
+    formula = (output / "homebrew" / "ragmail.rb").read_text(encoding="utf-8")
+    assert "class Ragmail < Formula" in formula
     assert f'version "{version}"' in formula
 
 
 def test_publish_homebrew_tap_script_updates_local_tap_repo(tmp_path: Path) -> None:
     script = REPO_ROOT / "just.d/scripts/publish-homebrew-tap.sh"
-    formula_path = tmp_path / "ragmail-rs.rb"
+    formula_path = tmp_path / "ragmail.rb"
     formula_path.write_text(
-        """class RagmailRs < Formula
+        """class Ragmail < Formula
   desc "test"
   homepage "https://example.com"
   url "https://example.com/ragmail-v0.1.0-macos-amd64.tar.gz"
@@ -137,8 +140,8 @@ end
     tap_seed = tmp_path / "tap-seed"
     subprocess.run(["git", "clone", str(tap_bare), str(tap_seed)], check=True, cwd=REPO_ROOT)
     (tap_seed / "Formula").mkdir(parents=True, exist_ok=True)
-    (tap_seed / "Formula" / "ragmail-rs.rb").write_text(
-        """class RagmailRs < Formula
+    (tap_seed / "Formula" / "ragmail.rb").write_text(
+        """class Ragmail < Formula
   desc "seed"
   homepage "https://example.com"
   url "https://example.com/seed.tar.gz"
@@ -150,7 +153,7 @@ end
     )
     subprocess.run(["git", "config", "user.name", "seed"], check=True, cwd=tap_seed)
     subprocess.run(["git", "config", "user.email", "seed@example.com"], check=True, cwd=tap_seed)
-    subprocess.run(["git", "add", "Formula/ragmail-rs.rb"], check=True, cwd=tap_seed)
+    subprocess.run(["git", "add", "Formula/ragmail.rb"], check=True, cwd=tap_seed)
     subprocess.run(["git", "commit", "-m", "seed"], check=True, cwd=tap_seed)
     subprocess.run(["git", "push", "origin", "HEAD"], check=True, cwd=tap_seed)
 
@@ -170,6 +173,6 @@ end
 
     tap_verify = tmp_path / "tap-verify"
     subprocess.run(["git", "clone", str(tap_bare), str(tap_verify)], check=True, cwd=REPO_ROOT)
-    published_formula = (tap_verify / "Formula" / "ragmail-rs.rb").read_text(encoding="utf-8")
+    published_formula = (tap_verify / "Formula" / "ragmail.rb").read_text(encoding="utf-8")
     assert "version \"0.1.0\"" in published_formula
     assert "seed.tar.gz" not in published_formula

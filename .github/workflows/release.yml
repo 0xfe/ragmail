@@ -49,11 +49,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
             deb_arch: amd64
             cross_compile: "false"
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             suffix: linux-arm64
             target: aarch64-unknown-linux-gnu
             deb_arch: arm64
-            cross_compile: "true"
+            cross_compile: "false"
           - os: macos-13
             suffix: macos-amd64
             target: x86_64-apple-darwin
@@ -74,6 +74,20 @@ jobs:
         with:
           toolchain: 1.93.0
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Create virtualenv
+        run: uv venv
+
+      - name: Install Python dependencies
+        run: UV_PROJECT_ENVIRONMENT="${{ github.workspace }}/.venv" uv sync --project python --extra dev
+
       - name: Install Linux arm64 cross toolchain
         if: ${{ matrix.cross_compile == 'true' }}
         run: |
@@ -88,20 +102,29 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
+      - name: Build Python bridge binary
+        run: ./just.d/scripts/build-python-bridge.sh --output-dir dist
+
       - name: Package release artifacts
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          binary="rust/target/${{ matrix.target }}/release/ragmail-rs"
-          tar -C "$(dirname "${binary}")" -czf "dist/ragmail-v${version}-${{ matrix.suffix }}.tar.gz" ragmail-rs
+          binary="rust/target/${{ matrix.target }}/release/ragmail"
+          bridge="dist/ragmail-py"
+          bundle_dir="$(mktemp -d)"
+          cp "${binary}" "${bundle_dir}/ragmail"
+          cp "${bridge}" "${bundle_dir}/ragmail-py"
+          chmod 0755 "${bundle_dir}/ragmail" "${bundle_dir}/ragmail-py"
+          tar -C "${bundle_dir}" -czf "dist/ragmail-v${version}-${{ matrix.suffix }}.tar.gz" ragmail ragmail-py
           if [[ -n "${{ matrix.deb_arch }}" ]]; then
             ./just.d/scripts/package-deb.sh \
               --version "${version}" \
               --arch "${{ matrix.deb_arch }}" \
               --binary "${binary}" \
-              --output "dist/ragmail-rs_${version}_${{ matrix.deb_arch }}.deb"
+              --bridge-binary "${bridge}" \
+              --output "dist/ragmail_${version}_${{ matrix.deb_arch }}.deb"
           fi
 
       - name: Upload build artifacts
@@ -138,7 +161,7 @@ jobs:
         with:
           files: |
             release-artifacts/flat/*
-            release-artifacts/homebrew/ragmail-rs.rb
+            release-artifacts/homebrew/ragmail.rb
 
   publish-homebrew-tap:
     needs: publish
@@ -167,7 +190,7 @@ jobs:
             --artifacts-dir release-artifacts \
             --output-dir release-artifacts
           ./just.d/scripts/publish-homebrew-tap.sh \
-            --formula release-artifacts/homebrew/ragmail-rs.rb \
+            --formula release-artifacts/homebrew/ragmail.rb \
             --tap-repo "${HOMEBREW_TAP_REPO}" \
             --version "${version}" \
             --token "${HOMEBREW_TAP_TOKEN}"

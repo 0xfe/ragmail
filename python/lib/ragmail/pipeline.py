@@ -1265,17 +1265,20 @@ def _path_size_bytes(path: Path) -> int:
 
 
 def _rust_cli_base_command() -> list[str]:
-    override = os.environ.get("RAGMAIL_RS_BIN")
+    override = os.environ.get("RAGMAIL_BIN") or os.environ.get("RAGMAIL_RS_BIN")
     if override:
         return shlex.split(override)
-    prebuilt = REPO_ROOT / "rust/target/debug/ragmail-rs"
+    prebuilt = REPO_ROOT / "rust/target/debug/ragmail"
+    legacy_prebuilt = REPO_ROOT / "rust/target/debug/ragmail-rs"
     if prebuilt.exists():
         return [str(prebuilt)]
+    if legacy_prebuilt.exists():
+        return [str(legacy_prebuilt)]
     manifest = REPO_ROOT / "rust/Cargo.toml"
     if not manifest.exists():
         raise RuntimeError(
             "Rust stage runner not found (missing rust/Cargo.toml). "
-            "Set RAGMAIL_RS_BIN to a prebuilt ragmail-rs binary, or set "
+            "Set RAGMAIL_BIN (or RAGMAIL_RS_BIN) to a prebuilt ragmail binary, or set "
             "RAGMAIL_RS_REPO_ROOT to a repository checkout."
         )
     return [
@@ -1303,7 +1306,7 @@ def _run_rust_cli(args: list[str], *, stage: str, ws: Workspace) -> str:
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"Rust stage '{stage}' unavailable ({exc}). "
-            "Install Rust toolchain or set RAGMAIL_RS_BIN to a ragmail-rs binary."
+            "Install Rust toolchain or set RAGMAIL_BIN to a ragmail binary."
         ) from exc
 
     output = f"{result.stdout}\n{result.stderr}".strip()

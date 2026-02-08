@@ -100,9 +100,38 @@ pub fn split_mbox_by_month_with_options(
         checkpoint_path,
         checkpoint_every,
         DEFAULT_MAX_OPEN_SPLIT_WRITERS,
+        None,
+        Duration::from_millis(250),
     )
 }
 
+/// Splits an MBOX file into monthly output files with optional checkpoint writes and
+/// periodic progress callbacks.
+#[allow(clippy::too_many_arguments)]
+pub fn split_mbox_by_month_with_options_and_progress(
+    input_path: &Path,
+    output_dir: &Path,
+    start_offset: u64,
+    filter_years: Option<&std::collections::BTreeSet<u16>>,
+    checkpoint_path: Option<&Path>,
+    checkpoint_every: Duration,
+    progress_every: Duration,
+    progress_callback: &mut dyn FnMut(&SplitStats),
+) -> Result<SplitStats, MboxError> {
+    split_mbox_by_month_with_options_and_limit(
+        input_path,
+        output_dir,
+        start_offset,
+        filter_years,
+        checkpoint_path,
+        checkpoint_every,
+        DEFAULT_MAX_OPEN_SPLIT_WRITERS,
+        Some(progress_callback),
+        progress_every,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn split_mbox_by_month_with_options_and_limit(
     input_path: &Path,
     output_dir: &Path,
@@ -111,6 +140,8 @@ fn split_mbox_by_month_with_options_and_limit(
     checkpoint_path: Option<&Path>,
     checkpoint_every: Duration,
     max_open_writers: usize,
+    mut progress_callback: Option<&mut dyn FnMut(&SplitStats)>,
+    progress_every: Duration,
 ) -> Result<SplitStats, MboxError> {
     std::fs::create_dir_all(output_dir)?;
     let mut stream = MboxMessageStream::from_path(input_path, start_offset)?;
@@ -119,6 +150,7 @@ fn split_mbox_by_month_with_options_and_limit(
     let mut writer_lru: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut stats = SplitStats::default();
     let mut last_checkpoint = Instant::now();
+    let mut last_progress = Instant::now();
     let writer_limit = max_open_writers.max(1);
 
     loop {
@@ -127,16 +159,29 @@ fn split_mbox_by_month_with_options_and_limit(
             break;
         };
         stats.processed += 1;
+        stats.last_position = stream.resume_offset();
 
         let Some((year, month)) = envelope_year_month(&message.raw) else {
             stats.errors += 1;
             stats.skipped += 1;
+            emit_split_progress(
+                &mut progress_callback,
+                &mut last_progress,
+                progress_every,
+                &stats,
+            );
             continue;
         };
 
         if let Some(years) = filter_years {
             if !years.contains(&year) {
                 stats.skipped += 1;
+                emit_split_progress(
+                    &mut progress_callback,
+                    &mut last_progress,
+                    progress_every,
+                    &stats,
+                );
                 continue;
             }
         }
@@ -174,6 +219,12 @@ fn split_mbox_by_month_with_options_and_limit(
                 last_checkpoint = Instant::now();
             }
         }
+        emit_split_progress(
+            &mut progress_callback,
+            &mut last_progress,
+            progress_every,
+            &stats,
+        );
     }
 
     flush_writers(&mut writers)?;
@@ -182,7 +233,27 @@ fn split_mbox_by_month_with_options_and_limit(
     if let Some(path) = checkpoint_path {
         write_split_checkpoint(path, &stats)?;
     }
+    if let Some(callback) = progress_callback.as_mut() {
+        callback(&stats);
+    }
     Ok(stats)
+}
+
+fn emit_split_progress(
+    progress_callback: &mut Option<&mut dyn FnMut(&SplitStats)>,
+    last_progress: &mut Instant,
+    progress_every: Duration,
+    stats: &SplitStats,
+) {
+    if let Some(callback) = progress_callback.as_mut() {
+        let due = stats.processed == 1
+            || progress_every.is_zero()
+            || last_progress.elapsed() >= progress_every;
+        if due {
+            callback(stats);
+            *last_progress = Instant::now();
+        }
+    }
 }
 
 fn flush_writers(
@@ -688,6 +759,8 @@ mod tests {
             None,
             Duration::from_secs(30),
             2,
+            None,
+            Duration::from_millis(250),
         )
         .expect("split");
 

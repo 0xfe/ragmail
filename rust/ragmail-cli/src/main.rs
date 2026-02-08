@@ -1,22 +1,586 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use chrono::Local;
 use clap::ArgAction;
 use clap::{Parser, Subcommand};
-use ragmail_clean::{clean_mbox_file, default_clean_outputs, default_summary_output, CleanOptions};
+use ragmail_clean::{
+    clean_mbox_file, clean_mbox_file_with_progress, default_clean_outputs, default_summary_output,
+    CleanOptions,
+};
 use ragmail_core::workspace::Workspace;
 use ragmail_index::{build_index_for_file, BuildOptions};
-use ragmail_mbox::{split_mbox_by_month, split_mbox_by_month_with_options};
+use ragmail_mbox::{
+    split_mbox_by_month, split_mbox_by_month_with_options,
+    split_mbox_by_month_with_options_and_progress,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const APP_VERSION: &str = env!("RAGMAIL_VERSION");
+const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5";
+
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_RED: &str = "\x1b[91m";
+const ANSI_GREEN: &str = "\x1b[92m";
+const ANSI_YELLOW: &str = "\x1b[93m";
+const ANSI_BLUE: &str = "\x1b[94m";
+const ANSI_CYAN: &str = "\x1b[96m";
+
+#[derive(Clone, Debug)]
+struct StageProgress {
+    processed: u64,
+    total: Option<u64>,
+    skipped: u64,
+    meta: HashMap<String, Value>,
+}
+
+#[derive(Debug)]
+struct StageDisplayState {
+    stages: Vec<String>,
+    status: HashMap<String, String>,
+    progress: HashMap<String, StageProgress>,
+    durations: HashMap<String, f64>,
+    spinner_idx: HashMap<String, usize>,
+    stage_width: usize,
+    status_width: usize,
+    duration_width: usize,
+    lines_printed: usize,
+    note: String,
+    last_render: Instant,
+    dirty: bool,
+}
+
+#[derive(Debug)]
+struct StageDisplay {
+    state: Arc<Mutex<StageDisplayState>>,
+    stop_spinner: Arc<AtomicBool>,
+    spinner_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl StageDisplay {
+    fn new(stages: &[&str]) -> Self {
+        let stage_names = stages
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        let mut status = HashMap::new();
+        let mut progress = HashMap::new();
+        let mut spinner_idx = HashMap::new();
+        for stage in &stage_names {
+            status.insert(stage.clone(), "pending".to_string());
+            progress.insert(
+                stage.clone(),
+                StageProgress {
+                    processed: 0,
+                    total: None,
+                    skipped: 0,
+                    meta: HashMap::new(),
+                },
+            );
+            spinner_idx.insert(stage.clone(), 0);
+        }
+        let stage_width = stage_names.iter().map(String::len).max().unwrap_or(8);
+        let status_width = "pending".len();
+        Self {
+            state: Arc::new(Mutex::new(StageDisplayState {
+                stages: stage_names,
+                status,
+                progress,
+                durations: HashMap::new(),
+                spinner_idx,
+                stage_width,
+                status_width,
+                duration_width: 0,
+                lines_printed: 0,
+                note: String::new(),
+                last_render: Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap_or_else(Instant::now),
+                dirty: false,
+            })),
+            stop_spinner: Arc::new(AtomicBool::new(false)),
+            spinner_handle: None,
+        }
+    }
+
+    fn start_spinner(&mut self) {
+        if self.spinner_handle.is_some() {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        let stop = Arc::clone(&self.stop_spinner);
+        self.spinner_handle = Some(thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                {
+                    let mut guard = state.lock().expect("stage display lock");
+                    for stage in guard.stages.clone() {
+                        if let Some(status) = guard.status.get(&stage).map(String::as_str) {
+                            if is_active_status(status) {
+                                let spinner = guard.spinner_idx.entry(stage).or_insert(0);
+                                *spinner = (*spinner + 1) % spinner_frames().len();
+                            }
+                        }
+                    }
+                }
+                StageDisplay::render_locked(&state, false);
+                thread::sleep(Duration::from_millis(200));
+            }
+        }));
+    }
+
+    fn stop_spinner(&mut self) {
+        self.stop_spinner.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.spinner_handle.take() {
+            let _ = handle.join();
+        }
+    }
+
+    fn update_status(&self, stage: &str, status: &str, duration_s: Option<f64>) {
+        {
+            let mut guard = self.state.lock().expect("stage display lock");
+            guard.status.insert(stage.to_string(), status.to_string());
+            guard.status_width = guard.status_width.max(status.len());
+            if let Some(duration) = duration_s {
+                guard.durations.insert(stage.to_string(), duration);
+                guard.duration_width = guard.duration_width.max(format_time(duration).len());
+            }
+        }
+        self.render(true);
+    }
+
+    fn set_total(&self, stage: &str, total: u64) {
+        {
+            let mut guard = self.state.lock().expect("stage display lock");
+            if let Some(progress) = guard.progress.get_mut(stage) {
+                progress.total = Some(total);
+            }
+        }
+        self.render(true);
+    }
+
+    fn update_progress(
+        &self,
+        stage: &str,
+        processed: Option<u64>,
+        skipped: Option<u64>,
+        meta: Option<HashMap<String, Value>>,
+    ) {
+        {
+            let mut guard = self.state.lock().expect("stage display lock");
+            if let Some(progress) = guard.progress.get_mut(stage) {
+                if let Some(processed_value) = processed {
+                    progress.processed = processed_value;
+                }
+                if let Some(skipped_value) = skipped {
+                    progress.skipped = skipped_value;
+                }
+                if let Some(extra_meta) = meta {
+                    for (key, value) in extra_meta {
+                        progress.meta.insert(key, value);
+                    }
+                }
+            }
+        }
+        self.render(false);
+    }
+
+    fn note(&self, message: impl Into<String>) {
+        {
+            let mut guard = self.state.lock().expect("stage display lock");
+            guard.note = message.into();
+        }
+        self.render(true);
+    }
+
+    fn render(&self, force: bool) {
+        Self::render_locked(&self.state, force);
+    }
+
+    fn finish(&self) {
+        {
+            let mut guard = self.state.lock().expect("stage display lock");
+            guard.note.clear();
+        }
+        self.render(true);
+    }
+
+    fn render_locked(state: &Arc<Mutex<StageDisplayState>>, force: bool) {
+        let min_render_interval = Duration::from_millis(200);
+        let mut guard = state.lock().expect("stage display lock");
+        if !force && guard.last_render.elapsed() < min_render_interval {
+            guard.dirty = true;
+            return;
+        }
+        guard.dirty = false;
+        clear_lines(guard.lines_printed);
+
+        let mut lines = vec![format!("{ANSI_BOLD}Stages:{ANSI_RESET}")];
+        for stage in guard.stages.clone() {
+            let status = guard
+                .status
+                .get(&stage)
+                .cloned()
+                .unwrap_or_else(|| "pending".to_string());
+            let color = stage_status_color(&status);
+            let progress = guard
+                .progress
+                .get(&stage)
+                .cloned()
+                .unwrap_or(StageProgress {
+                    processed: 0,
+                    total: None,
+                    skipped: 0,
+                    meta: HashMap::new(),
+                });
+            let spinner = if is_active_status(&status) {
+                let idx = *guard.spinner_idx.get(&stage).unwrap_or(&0);
+                spinner_frames()[idx]
+            } else {
+                " "
+            };
+            let mut progress_text = format_progress_text(&stage, &progress);
+            if stage == "preprocess" {
+                let spam = progress
+                    .meta
+                    .get("spam")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let errors = progress
+                    .meta
+                    .get("errors")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                progress_text = format!(
+                    "{progress_text}  skipped: {} bulk, {} errors",
+                    format_count(spam),
+                    format_count(errors)
+                );
+            } else {
+                let skipped_exists = progress
+                    .meta
+                    .get("skipped_exists")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let skipped_errors = progress
+                    .meta
+                    .get("skipped_errors")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if skipped_exists > 0 || skipped_errors > 0 {
+                    progress_text = format!(
+                        "{progress_text}  skipped (exists: {}, errors: {})",
+                        format_count(skipped_exists),
+                        format_count(skipped_errors),
+                    );
+                } else if progress.skipped > 0 {
+                    progress_text = format!(
+                        "{progress_text}  skipped {}",
+                        format_count(progress.skipped)
+                    );
+                }
+            }
+
+            let duration_text = guard
+                .durations
+                .get(&stage)
+                .map(|duration| {
+                    format!(
+                        "  {ANSI_DIM}{:>width$}{ANSI_RESET}",
+                        format_time(*duration),
+                        width = guard.duration_width
+                    )
+                })
+                .unwrap_or_default();
+            lines.push(format!(
+                "  {spinner} {color}{stage:<stage_width$}{ANSI_RESET} {color}{status:<status_width$}{ANSI_RESET}  {progress_text}{duration_text}",
+                stage_width = guard.stage_width,
+                status_width = guard.status_width
+            ));
+        }
+        if !guard.note.is_empty() {
+            lines.push(format!("{ANSI_DIM}{}{ANSI_RESET}", guard.note));
+        }
+
+        print!("{}", lines.join("\n"));
+        println!();
+        let _ = std::io::stdout().flush();
+
+        guard.lines_printed = lines.len();
+        guard.last_render = Instant::now();
+    }
+}
+
+impl Drop for StageDisplay {
+    fn drop(&mut self) {
+        self.stop_spinner();
+    }
+}
+
+fn spinner_frames() -> [&'static str; 10] {
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+}
+
+fn clear_lines(n: usize) {
+    for _ in 0..n {
+        print!("\x1b[1A\r\x1b[2K");
+    }
+}
+
+fn stage_status_color(status: &str) -> &'static str {
+    match status {
+        "done" => ANSI_GREEN,
+        "running" | "starting" | "downloading" | "interrupted" => ANSI_YELLOW,
+        "failed" => ANSI_RED,
+        "skipped" => ANSI_BLUE,
+        _ => ANSI_DIM,
+    }
+}
+
+fn is_active_status(status: &str) -> bool {
+    matches!(status, "running" | "starting" | "downloading")
+}
+
+fn format_progress_text(stage: &str, progress: &StageProgress) -> String {
+    if let Some(startup_text) = progress.meta.get("startup_text").and_then(Value::as_str) {
+        if !startup_text.trim().is_empty() {
+            return startup_text.to_string();
+        }
+    }
+    let mut text = match progress.total {
+        Some(total) if total > 0 => {
+            let pct = progress.processed as f64 / total as f64 * 100.0;
+            format!(
+                "{}/{} ({pct:5.1}%)",
+                format_count(progress.processed),
+                format_count(total)
+            )
+        }
+        Some(0) => "0/0 (100.0%)".to_string(),
+        _ => format_count(progress.processed),
+    };
+    if stage == "model"
+        && (progress.meta.contains_key("downloaded_bytes")
+            || progress.meta.contains_key("cache_bytes"))
+    {
+        let downloaded = progress
+            .meta
+            .get("downloaded_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cache = progress
+            .meta
+            .get("cache_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        text = format!(
+            "{} downloaded  cache: {}",
+            format_bytes(downloaded),
+            format_bytes(cache)
+        );
+        if progress
+            .meta
+            .get("cache_hit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            text = format!("cache hit  {text}");
+        }
+        if let Some(elapsed_s) = progress.meta.get("elapsed_s").and_then(Value::as_f64) {
+            if elapsed_s > 0.0 {
+                text = format!("{text}  elapsed {}", format_time(elapsed_s));
+            }
+        }
+    } else if stage == "split" && progress.meta.contains_key("bytes_total") {
+        let bytes_total = progress
+            .meta
+            .get("bytes_total")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let bytes_processed = progress
+            .meta
+            .get("bytes_processed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let bytes_text = if bytes_total > 0 {
+            let pct = bytes_processed as f64 / bytes_total as f64 * 100.0;
+            format!(
+                "{}/{} ({pct:5.1}%)",
+                format_bytes(bytes_processed),
+                format_bytes(bytes_total)
+            )
+        } else {
+            format_bytes(bytes_processed)
+        };
+        text = format!("{} emails  {bytes_text}", format_count(progress.processed));
+    }
+    text
+}
+
+fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + (digits.len() / 3));
+    for (idx, ch) in digits.chars().rev().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    let mut value = bytes as f64;
+    for unit in ["B", "KB", "MB", "GB"] {
+        if value < 1024.0 {
+            return format!("{value:.1}{unit}");
+        }
+        value /= 1024.0;
+    }
+    format!("{value:.1}TB")
+}
+
+fn format_time(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.0}s")
+    } else if seconds < 3600.0 {
+        let minutes = (seconds / 60.0).floor();
+        let rem = seconds % 60.0;
+        format!("{minutes:.0}m {rem:.0}s")
+    } else {
+        let hours = (seconds / 3600.0).floor();
+        let minutes = ((seconds % 3600.0) / 60.0).floor();
+        format!("{hours:.0}h {minutes:.0}m")
+    }
+}
+
+fn print_pipeline_header(
+    workspace_root: &Path,
+    input_mboxes: &[PathBuf],
+    years: &[u16],
+    resume_effective: bool,
+    refresh: bool,
+    cache_root: &Path,
+) {
+    let input_label = if input_mboxes.is_empty() {
+        "none".to_string()
+    } else if input_mboxes.len() == 1 {
+        input_mboxes[0].display().to_string()
+    } else {
+        format!(
+            "{} (+{} more)",
+            input_mboxes[0].display(),
+            input_mboxes.len() - 1
+        )
+    };
+    let years_label = if years.is_empty() {
+        "all".to_string()
+    } else {
+        years
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let resume_label = if resume_effective {
+        "True".to_string()
+    } else if refresh {
+        "False (refresh)".to_string()
+    } else {
+        "False (state reset)".to_string()
+    };
+    let embedding = std::env::var("RAGMAIL_EMBEDDING_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string());
+
+    println!("{ANSI_CYAN}{ANSI_BOLD}RAGMail v{APP_VERSION} - running pipeline{ANSI_RESET}");
+    println!("Workspace: {}", workspace_root.display());
+    println!("Inputs:    {input_label}");
+    println!("Years:     {years_label}");
+    println!("Resume:    {resume_label}");
+    println!("Cache:     {}", cache_root.display());
+    println!("Embedding: {embedding}");
+    println!();
+}
+
+fn stage_detail_u64(state: &Value, stage: &str, key: &str) -> u64 {
+    state
+        .get("stages")
+        .and_then(Value::as_object)
+        .and_then(|stages| stages.get(stage))
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("details"))
+        .and_then(Value::as_object)
+        .and_then(|details| details.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn print_pipeline_summary(workspace: &Workspace, total_duration_s: f64) {
+    let split_files = collect_split_files(workspace.split_dir().as_path())
+        .map(|files| files.len())
+        .unwrap_or(0);
+    let state = workspace.load_state().unwrap_or_else(|_| json!({}));
+    let emails_found = stage_detail_u64(&state, "split", "processed");
+    let split_written = stage_detail_u64(&state, "split", "written");
+    let split_errors = stage_detail_u64(&state, "split", "errors");
+    let preprocess_total = stage_detail_u64(&state, "preprocess", "processed");
+    let preprocess_spam = stage_detail_u64(&state, "preprocess", "spam");
+    let preprocess_errors = stage_detail_u64(&state, "preprocess", "errors");
+    let vectorized = stage_detail_u64(&state, "vectorize", "processed");
+    let ingested = stage_detail_u64(&state, "ingest", "processed");
+    let ingest_errors = stage_detail_u64(&state, "ingest", "errors");
+    let split_error_text = if split_errors == 0 {
+        "no errors".to_string()
+    } else {
+        format!("{} errors", format_count(split_errors))
+    };
+
+    println!();
+    println!("{ANSI_BOLD}Outputs:{ANSI_RESET}");
+    println!("  Mailbox files: {split_files}");
+    println!("  Emails found: {}", format_count(emails_found));
+    println!(
+        "  Split: {} ({split_error_text})",
+        format_count(split_written)
+    );
+    println!(
+        "  Preprocessed: {} (ignoring: {} bulk, {} errors)",
+        format_count(preprocess_total),
+        format_count(preprocess_spam),
+        format_count(preprocess_errors)
+    );
+    println!("  Vectorized: {}", format_count(vectorized));
+    println!(
+        "  Ingested: {} ({} errors)",
+        format_count(ingested),
+        format_count(ingest_errors)
+    );
+    println!("  Embeddings: {}", workspace.embeddings_dir().display());
+    println!(
+        "  Database: {}",
+        workspace.db_dir().join("email_search.lancedb").display()
+    );
+    println!("  Total time: {}", format_time(total_duration_s));
+    println!("  Logs: {}", workspace.logs_dir().display());
+    println!();
+}
+
+fn is_interrupted_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("interrupted")
+}
 
 struct PipelineRunOptions<'a> {
     input_mboxes: &'a [PathBuf],
@@ -27,13 +591,23 @@ struct PipelineRunOptions<'a> {
     refresh: bool,
     checkpoint_interval: u64,
     years: &'a [u16],
+    clean_dir: Option<&'a Path>,
+    embeddings_dir: Option<&'a Path>,
+    db_path: Option<&'a Path>,
+    ingest_batch_size: Option<u64>,
+    embedding_batch_size: Option<u64>,
+    chunk_size: Option<u64>,
+    chunk_overlap: Option<u64>,
+    compact_every: Option<u64>,
+    skip_exists_check: bool,
+    repair_embeddings: bool,
 }
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "ragmail-rs",
+    name = "ragmail",
     version = APP_VERSION,
-    about = "Rust migration scaffold for ragmail"
+    about = "Rust-first CLI harness for ragmail"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,7 +616,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the Rust-native pipeline (stub in M1/M2).
+    /// Run the Rust-native pipeline.
     Pipeline {
         /// Input MBOX files.
         #[arg(value_name = "INPUT_MBOX")]
@@ -53,8 +627,8 @@ enum Command {
         /// Optional base directory for workspaces (default: `workspaces`).
         #[arg(long, value_name = "DIR")]
         base_dir: Option<PathBuf>,
-        /// Comma-separated stage list (`split,index,clean`).
-        #[arg(long, default_value = "split,index,clean")]
+        /// Comma-separated stage list (`model,split,preprocess,vectorize,ingest`).
+        #[arg(long, default_value = "model,split,preprocess,vectorize,ingest")]
         stages: String,
         /// Resume from stage checkpoints where available.
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
@@ -68,6 +642,36 @@ enum Command {
         /// Optional repeated year filters (`--years 2024 --years 2025`).
         #[arg(long)]
         years: Vec<u16>,
+        /// Use clean JSONL files from this directory (vectorize/ingest only).
+        #[arg(long, value_name = "DIR")]
+        clean_dir: Option<PathBuf>,
+        /// Use embeddings from or write embeddings to this directory.
+        #[arg(long, value_name = "DIR")]
+        embeddings_dir: Option<PathBuf>,
+        /// Override ingest database path (defaults to workspace db path).
+        #[arg(long, value_name = "PATH")]
+        db_path: Option<PathBuf>,
+        /// Emails per write batch.
+        #[arg(long)]
+        ingest_batch_size: Option<u64>,
+        /// Embedding model batch size.
+        #[arg(long)]
+        embedding_batch_size: Option<u64>,
+        /// Max characters per body chunk.
+        #[arg(long)]
+        chunk_size: Option<u64>,
+        /// Chunk overlap in characters.
+        #[arg(long)]
+        chunk_overlap: Option<u64>,
+        /// Run compaction every N ingested emails.
+        #[arg(long)]
+        compact_every: Option<u64>,
+        /// Skip per-email existence check for ingest.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        skip_exists_check: bool,
+        /// Disable automatic repair of missing embeddings during ingest.
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        no_repair_embeddings: bool,
     },
     /// Split an MBOX into monthly files (`YYYY-MM.mbox`).
     Split {
@@ -92,7 +696,8 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         checkpoint_interval: u64,
     },
-    /// Build a byte-offset index JSONL for an MBOX file.
+    /// Build a byte-offset index JSONL for an MBOX file (compatibility helper).
+    #[command(hide = true)]
     Index {
         /// Input MBOX file.
         input: PathBuf,
@@ -112,8 +717,9 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         checkpoint_interval: u64,
     },
-    /// Clean an MBOX into JSONL outputs (M3 scaffold).
-    Clean {
+    /// Preprocess an MBOX into clean/spam/index outputs.
+    #[command(name = "preprocess", alias = "clean")]
+    Preprocess {
         /// Input MBOX file.
         input: PathBuf,
         /// Output clean JSONL path (`*.clean.jsonl`).
@@ -140,18 +746,24 @@ enum Command {
     },
     /// Print resolved version.
     Version,
+    /// Forward non-Rust commands to the Python bridge CLI.
+    #[command(external_subcommand)]
+    Passthrough(Vec<String>),
 }
 
 fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
     let pipeline_started = Instant::now();
     let stages = parse_stage_selection(options.stages_raw)?;
+    let wants_model = stages.contains("model");
     let wants_split = stages.contains("split");
-    let wants_index = stages.contains("index");
-    let wants_clean = stages.contains("clean");
+    let wants_preprocess = stages.contains("preprocess");
     let wants_vectorize = stages.contains("vectorize");
     let wants_ingest = stages.contains("ingest");
     if wants_split && options.input_mboxes.is_empty() {
         bail!("split stage requires at least one input mbox");
+    }
+    if options.clean_dir.is_some() && (wants_split || wants_preprocess) {
+        bail!("--clean-dir can only be used for vectorize/ingest stages");
     }
 
     let workspace_base = options.base_dir.unwrap_or_else(|| Path::new("workspaces"));
@@ -172,6 +784,31 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
     let reports_dir = workspace.reports_dir();
     let checkpoints_dir = workspace.checkpoints_dir();
     let logs_dir = workspace.logs_dir();
+    let cache_root = std::env::var("RAGMAIL_CACHE_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if let Some(base_dir) = options.base_dir {
+                base_dir.join(".ragmail-cache")
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(".ragmail-cache")
+            }
+        });
+    print_pipeline_header(
+        &workspace_root,
+        options.input_mboxes,
+        options.years,
+        resume_effective,
+        options.refresh,
+        &cache_root,
+    );
+    let mut stage_display =
+        StageDisplay::new(&["model", "split", "preprocess", "vectorize", "ingest"]);
+    stage_display.render(true);
+    stage_display.start_spinner();
 
     let checkpoint_every = Duration::from_secs(options.checkpoint_interval);
     let year_filter = if options.years.is_empty() {
@@ -193,6 +830,115 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
         ),
     );
 
+    let model_should_run = wants_model && (!resume_effective || !workspace.stage_done("model")?);
+    if model_should_run {
+        let model_started = Instant::now();
+        log_event(logs_dir.as_path(), "model", "INFO", "start");
+        stage_display.update_status("model", "downloading", None);
+        workspace.update_stage("model", "running", None)?;
+        let mut args = vec![
+            "--workspace".to_string(),
+            options.workspace_name.to_string(),
+        ];
+        if let Some(base) = options.base_dir {
+            args.extend(["--base-dir".to_string(), base.display().to_string()]);
+        }
+        let result = run_python_bridge("model", &args, logs_dir.as_path(), |event| {
+            if event.get("event").and_then(Value::as_str) == Some("progress") {
+                let downloaded = event
+                    .get("downloaded_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let cache_bytes = event
+                    .get("cache_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let mut meta = HashMap::new();
+                meta.insert("downloaded_bytes".to_string(), Value::from(downloaded));
+                meta.insert("cache_bytes".to_string(), Value::from(cache_bytes));
+                if let Some(elapsed_s) = event.get("elapsed_s").and_then(Value::as_f64) {
+                    if let Some(number) = serde_json::Number::from_f64(elapsed_s) {
+                        meta.insert("elapsed_s".to_string(), Value::Number(number));
+                    }
+                }
+                stage_display.update_progress("model", Some(0), None, Some(meta));
+            }
+        });
+        let value = match result {
+            Ok(payload) => payload,
+            Err(err) => {
+                log_event(
+                    logs_dir.as_path(),
+                    "model",
+                    "ERROR",
+                    format!("failed: {err}"),
+                );
+                if is_interrupted_error(&err) {
+                    stage_display.note(
+                        "Interrupt received. Finishing current batch and saving checkpoints...",
+                    );
+                    stage_display.update_status("model", "interrupted", None);
+                    workspace.update_stage(
+                        "model",
+                        "interrupted",
+                        details_map(json!({"error": err.to_string()})),
+                    )?;
+                } else {
+                    stage_display.update_status("model", "failed", None);
+                    workspace.update_stage(
+                        "model",
+                        "failed",
+                        details_map(json!({"error": err.to_string()})),
+                    )?;
+                }
+                return Err(err);
+            }
+        };
+        let downloaded_bytes = value
+            .get("downloaded_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cache_bytes = value
+            .get("cache_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let model_duration_s = model_started.elapsed().as_secs_f64();
+        workspace.update_stage(
+            "model",
+            "done",
+            details_map(json!({
+                "downloaded_bytes": downloaded_bytes,
+                "cache_bytes": cache_bytes,
+                "duration_s": model_duration_s
+            })),
+        )?;
+        log_event(
+            logs_dir.as_path(),
+            "model",
+            "INFO",
+            format!(
+                "done downloaded_bytes={} cache_bytes={} duration_s={:.3}",
+                downloaded_bytes, cache_bytes, model_duration_s
+            ),
+        );
+        let mut meta = HashMap::new();
+        meta.insert(
+            "downloaded_bytes".to_string(),
+            Value::from(downloaded_bytes),
+        );
+        meta.insert("cache_bytes".to_string(), Value::from(cache_bytes));
+        meta.insert(
+            "cache_hit".to_string(),
+            Value::from(downloaded_bytes == 0 && cache_bytes > 0),
+        );
+        meta.insert("elapsed_s".to_string(), Value::Null);
+        stage_display.update_progress("model", Some(0), None, Some(meta));
+        stage_display.update_status("model", "done", Some(model_duration_s));
+    } else if wants_model {
+        log_event(logs_dir.as_path(), "model", "INFO", "skipped");
+        stage_display.update_status("model", "skipped", None);
+    }
+
     let existing_split_files = collect_split_files(split_dir.as_path())?;
     let split_outputs_exist = !existing_split_files.is_empty();
     let split_should_run = wants_split
@@ -200,6 +946,7 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
     if split_should_run {
         let split_started = Instant::now();
         log_event(logs_dir.as_path(), "split", "INFO", "start");
+        stage_display.update_status("split", "starting", None);
         let split_inputs = options
             .input_mboxes
             .iter()
@@ -215,12 +962,60 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
             std::fs::remove_dir_all(&split_checkpoint_dir)?;
         }
         std::fs::create_dir_all(&split_checkpoint_dir)?;
+        let split_total_bytes = options
+            .input_mboxes
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .sum::<u64>();
+        stage_display.update_progress(
+            "split",
+            Some(0),
+            Some(0),
+            Some(HashMap::from([
+                (
+                    "startup_text".to_string(),
+                    Value::from("initializing split inputs"),
+                ),
+                ("bytes_total".to_string(), Value::from(split_total_bytes)),
+                ("bytes_processed".to_string(), Value::from(0)),
+            ])),
+        );
         let mut split_processed = 0_u64;
         let mut split_written = 0_u64;
         let mut split_skipped = 0_u64;
         let mut split_errors = 0_u64;
+        let mut split_bytes_processed = 0_u64;
+        let split_file_count = options.input_mboxes.len();
+        let mut split_processing_started = false;
         let split_result = (|| -> anyhow::Result<()> {
-            for input in options.input_mboxes {
+            for (split_input_idx, input) in options.input_mboxes.iter().enumerate() {
+                let file_name = input
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                stage_display.update_progress(
+                    "split",
+                    Some(split_processed),
+                    Some(split_skipped),
+                    Some(HashMap::from([
+                        (
+                            "startup_text".to_string(),
+                            Value::from(format!(
+                                "opening file {}/{}: {}",
+                                split_input_idx + 1,
+                                split_file_count,
+                                file_name
+                            )),
+                        ),
+                        ("bytes_total".to_string(), Value::from(split_total_bytes)),
+                        (
+                            "bytes_processed".to_string(),
+                            Value::from(split_bytes_processed.min(split_total_bytes)),
+                        ),
+                    ])),
+                );
                 let checkpoint_path = split_checkpoint_path(&split_checkpoint_dir, input);
                 let start_offset = if resume_effective {
                     load_last_position(&checkpoint_path)?
@@ -238,27 +1033,73 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                         checkpoint_path.display()
                     ),
                 );
-                let stats = split_mbox_by_month_with_options(
+                let base_processed = split_processed;
+                let base_written = split_written;
+                let base_skipped = split_skipped;
+                let base_errors = split_errors;
+                let input_total_bytes =
+                    std::fs::metadata(input).map(|meta| meta.len()).unwrap_or(0);
+                let bytes_before = split_bytes_processed;
+                let mut on_progress = |stats: &ragmail_mbox::SplitStats| {
+                    if !split_processing_started {
+                        split_processing_started = true;
+                        stage_display.update_status("split", "running", None);
+                    }
+                    let current_processed = base_processed + stats.processed;
+                    let current_skipped = base_skipped + stats.skipped;
+                    let current_errors = base_errors + stats.errors;
+                    let current_bytes = bytes_before + stats.last_position.min(input_total_bytes);
+                    log_progress(
+                        logs_dir.as_path(),
+                        "split",
+                        current_processed,
+                        None,
+                        Some(current_skipped),
+                        Some(current_errors),
+                    );
+                    let mut meta = HashMap::new();
+                    meta.insert("startup_text".to_string(), Value::from(""));
+                    meta.insert("bytes_total".to_string(), Value::from(split_total_bytes));
+                    meta.insert(
+                        "bytes_processed".to_string(),
+                        Value::from(current_bytes.min(split_total_bytes)),
+                    );
+                    stage_display.update_progress(
+                        "split",
+                        Some(current_processed),
+                        Some(current_skipped),
+                        Some(meta),
+                    );
+                };
+                let stats = split_mbox_by_month_with_options_and_progress(
                     input,
                     split_dir.as_path(),
                     start_offset,
                     year_filter.as_ref(),
                     Some(checkpoint_path.as_path()),
                     checkpoint_every,
+                    Duration::from_millis(250),
+                    &mut on_progress,
                 )
                 .with_context(|| format!("split failed for {}", input.display()))?;
-                split_processed += stats.processed;
-                split_written += stats.written;
-                split_skipped += stats.skipped;
-                split_errors += stats.errors;
-                log_progress(
-                    logs_dir.as_path(),
-                    "split",
-                    split_processed,
-                    None,
-                    Some(split_skipped),
-                    Some(split_errors),
-                );
+                split_processed = base_processed + stats.processed;
+                split_written = base_written + stats.written;
+                split_skipped = base_skipped + stats.skipped;
+                split_errors = base_errors + stats.errors;
+                split_bytes_processed = bytes_before + input_total_bytes;
+                if !split_processing_started {
+                    split_processing_started = true;
+                    stage_display.update_status("split", "running", None);
+                    stage_display.update_progress(
+                        "split",
+                        Some(split_processed),
+                        Some(split_skipped),
+                        Some(HashMap::from([(
+                            "startup_text".to_string(),
+                            Value::from(""),
+                        )])),
+                    );
+                }
                 if checkpoint_path.exists() {
                     std::fs::remove_file(checkpoint_path)?;
                 }
@@ -277,6 +1118,18 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                 "failed",
                 details_map(json!({"error": err.to_string()})),
             )?;
+            if is_interrupted_error(&err) {
+                stage_display
+                    .note("Interrupt received. Finishing current batch and saving checkpoints...");
+                stage_display.update_status("split", "interrupted", None);
+                workspace.update_stage(
+                    "split",
+                    "interrupted",
+                    details_map(json!({"error": err.to_string()})),
+                )?;
+            } else {
+                stage_display.update_status("split", "failed", None);
+            }
             return Err(err);
         }
         let split_duration_s = split_started.elapsed().as_secs_f64();
@@ -292,10 +1145,6 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                 "duration_s": split_duration_s
             })),
         )?;
-        println!(
-            "pipeline split: processed={} written={} skipped={} errors={}",
-            split_processed, split_written, split_skipped, split_errors
-        );
         log_event(
             logs_dir.as_path(),
             "split",
@@ -305,13 +1154,23 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                 split_processed, split_written, split_skipped, split_errors, split_duration_s
             ),
         );
+        stage_display.update_progress(
+            "split",
+            Some(split_processed),
+            Some(split_skipped),
+            Some(HashMap::from([(
+                "startup_text".to_string(),
+                Value::from(""),
+            )])),
+        );
+        stage_display.update_status("split", "done", Some(split_duration_s));
     } else if wants_split {
-        println!("pipeline split: skipped");
         log_event(logs_dir.as_path(), "split", "INFO", "skipped");
+        stage_display.update_status("split", "skipped", None);
     }
 
     let split_files = collect_split_files(split_dir.as_path())?;
-    if (wants_index || wants_clean) && split_files.is_empty() {
+    if wants_preprocess && split_files.is_empty() {
         log_event(
             logs_dir.as_path(),
             "split",
@@ -321,134 +1180,92 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
         bail!("no split outputs found in {}", split_dir.display());
     }
 
+    let preprocess_checkpoint_dir = checkpoints_dir.join("preprocess-rs");
+    let preprocess_index_parts_dir = preprocess_checkpoint_dir.join("index-parts");
     let output_index = split_dir.join("mbox_index.jsonl");
-    let index_outputs_exist = output_index.exists();
-    let index_should_run = wants_index
-        && (!resume_effective || !workspace.stage_done("index")? || !index_outputs_exist);
-    if index_should_run {
-        let index_started = Instant::now();
-        log_event(logs_dir.as_path(), "index", "INFO", "start");
-        workspace.update_stage(
-            "index",
-            "running",
-            details_map(json!({"split_dir": split_dir.display().to_string()})),
-        )?;
-        let index_checkpoint_dir = checkpoints_dir.join("mbox_index-rs");
-        let parts_dir = index_checkpoint_dir.join("parts");
-        let state_dir = index_checkpoint_dir.join("state");
-        if !resume_effective {
-            if output_index.exists() {
-                std::fs::remove_file(&output_index)?;
-            }
-            if index_checkpoint_dir.exists() {
-                std::fs::remove_dir_all(&index_checkpoint_dir)?;
-            }
-        }
-        std::fs::create_dir_all(&parts_dir)?;
-        std::fs::create_dir_all(&state_dir)?;
 
-        let mut indexed_total = 0_u64;
-        let index_result = (|| -> anyhow::Result<()> {
-            for split_file in &split_files {
-                let mbox_name = split_file
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("invalid split file name: {}", split_file.display())
-                    })?
-                    .to_string();
-                let stem = split_file
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("invalid split file stem: {}", split_file.display())
-                    })?;
-                let part_output = parts_dir.join(format!("{mbox_name}.jsonl"));
-                let checkpoint_path = state_dir.join(format!("{stem}.checkpoint.json"));
-
-                if resume_effective && part_output.exists() && !checkpoint_path.exists() {
-                    indexed_total += count_non_empty_lines(&part_output)?;
-                    log_progress(logs_dir.as_path(), "index", indexed_total, None, None, None);
-                    continue;
-                }
-
-                let options = BuildOptions {
-                    checkpoint_path: Some(checkpoint_path),
-                    resume: resume_effective,
-                    checkpoint_every,
-                };
-                build_index_for_file(split_file, &mbox_name, &part_output, &options).with_context(
-                    || format!("index build failed for split file {}", split_file.display()),
-                )?;
-                indexed_total += count_non_empty_lines(&part_output)?;
-                log_progress(logs_dir.as_path(), "index", indexed_total, None, None, None);
-            }
-            merge_index_parts(parts_dir.as_path(), &split_files, output_index.as_path())?;
-            Ok(())
-        })();
-        if let Err(err) = index_result {
-            log_event(
-                logs_dir.as_path(),
-                "index",
-                "ERROR",
-                format!("failed: {err}"),
-            );
-            workspace.update_stage(
-                "index",
-                "failed",
-                details_map(json!({"error": err.to_string()})),
-            )?;
-            return Err(err);
-        }
-        let merged_count = count_non_empty_lines(&output_index)?;
-        let index_duration_s = index_started.elapsed().as_secs_f64();
-        workspace.update_stage(
-            "index",
-            "done",
-            details_map(json!({
-                "output": output_index.display().to_string(),
-                "indexed": merged_count,
-                "parts_total": indexed_total,
-                "duration_s": index_duration_s
-            })),
-        )?;
-        println!("pipeline index: indexed={merged_count} parts_total={indexed_total}");
-        log_event(
-            logs_dir.as_path(),
-            "index",
-            "INFO",
-            format!(
-                "done indexed={merged_count} parts_total={indexed_total} duration_s={:.3}",
-                index_duration_s
-            ),
-        );
-    } else if wants_index {
-        println!("pipeline index: skipped");
-        log_event(logs_dir.as_path(), "index", "INFO", "skipped");
-    }
-
-    let expected_clean_missing = split_files.iter().any(|split_file| {
+    let expected_preprocess_missing = split_files.iter().any(|split_file| {
         let stem = split_file
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        !clean_dir.join(format!("{stem}.clean.jsonl")).exists()
+        let mbox_name = split_file
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let clean_path = clean_dir.join(format!("{stem}.clean.jsonl"));
+        let spam_path = spam_dir.join(format!("{stem}.spam.jsonl"));
+        let summary_path = reports_dir.join(format!("{mbox_name}.summary"));
+        let index_part_path = preprocess_index_parts_dir.join(format!("{mbox_name}.jsonl"));
+        !(clean_path.exists()
+            && spam_path.exists()
+            && summary_path.exists()
+            && index_part_path.exists())
     });
-    let clean_should_run = wants_clean
-        && (!resume_effective || !workspace.stage_done("clean")? || expected_clean_missing);
-    if clean_should_run {
-        let clean_started = Instant::now();
-        log_event(logs_dir.as_path(), "clean", "INFO", "start");
+    let preprocess_should_run = wants_preprocess
+        && (!resume_effective
+            || !workspace.stage_done("preprocess")?
+            || !output_index.exists()
+            || expected_preprocess_missing);
+    if preprocess_should_run {
+        let preprocess_started = Instant::now();
+        log_event(logs_dir.as_path(), "preprocess", "INFO", "start");
+        stage_display.update_status("preprocess", "starting", None);
         workspace.update_stage(
-            "clean",
+            "preprocess",
             "running",
             details_map(json!({"files": split_files.len()})),
         )?;
-        let mut clean_processed = 0_u64;
-        let mut clean_written = 0_u64;
-        let mut clean_spam = 0_u64;
-        let mut clean_errors = 0_u64;
-        let clean_result = (|| -> anyhow::Result<()> {
+        let mut preprocess_total = 0_u64;
+        let preprocess_file_count = split_files.len();
+        for (idx, split_file) in split_files.iter().enumerate() {
+            let file_name = split_file
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            stage_display.update_progress(
+                "preprocess",
+                Some(0),
+                Some(0),
+                Some(HashMap::from([(
+                    "startup_text".to_string(),
+                    Value::from(format!(
+                        "scanning split files {}/{}: {}",
+                        idx + 1,
+                        preprocess_file_count,
+                        file_name
+                    )),
+                )])),
+            );
+            preprocess_total += count_mbox_envelopes(split_file).unwrap_or(0);
+        }
+        stage_display.set_total("preprocess", preprocess_total);
+        stage_display.update_status("preprocess", "running", None);
+        stage_display.update_progress(
+            "preprocess",
+            Some(0),
+            Some(0),
+            Some(HashMap::from([(
+                "startup_text".to_string(),
+                Value::from(""),
+            )])),
+        );
+        if !resume_effective {
+            if output_index.exists() {
+                std::fs::remove_file(&output_index)?;
+            }
+            if preprocess_checkpoint_dir.exists() {
+                std::fs::remove_dir_all(&preprocess_checkpoint_dir)?;
+            }
+        }
+        std::fs::create_dir_all(&preprocess_index_parts_dir)?;
+
+        let mut preprocess_processed = 0_u64;
+        let mut preprocess_written = 0_u64;
+        let mut preprocess_spam = 0_u64;
+        let mut preprocess_errors = 0_u64;
+        let preprocess_result = (|| -> anyhow::Result<()> {
             for split_file in &split_files {
                 let stem = split_file
                     .file_stem()
@@ -464,102 +1281,186 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                     })?
                     .to_string();
                 let clean_output = clean_dir.join(format!("{stem}.clean.jsonl"));
-                if resume_effective && clean_output.exists() {
+                let spam_output = spam_dir.join(format!("{stem}.spam.jsonl"));
+                let summary_output = reports_dir.join(format!("{mbox_name}.summary"));
+                let index_part_output =
+                    preprocess_index_parts_dir.join(format!("{mbox_name}.jsonl"));
+                if resume_effective
+                    && clean_output.exists()
+                    && spam_output.exists()
+                    && summary_output.exists()
+                    && index_part_output.exists()
+                {
                     log_event(
                         logs_dir.as_path(),
-                        "clean",
+                        "preprocess",
                         "INFO",
-                        format!("skip existing output={}", clean_output.display()),
+                        format!(
+                            "skip existing outputs clean={} spam={} summary={} index_part={}",
+                            clean_output.display(),
+                            spam_output.display(),
+                            summary_output.display(),
+                            index_part_output.display()
+                        ),
+                    );
+                    preprocess_processed += count_non_empty_lines(&clean_output)?;
+                    stage_display.update_progress(
+                        "preprocess",
+                        Some(preprocess_processed),
+                        Some(preprocess_spam + preprocess_errors),
+                        Some(HashMap::from([
+                            ("spam".to_string(), Value::from(preprocess_spam)),
+                            ("errors".to_string(), Value::from(preprocess_errors)),
+                        ])),
                     );
                     continue;
                 }
-                let spam_output = spam_dir.join(format!("{stem}.spam.jsonl"));
-                let summary_output = reports_dir.join(format!("{mbox_name}.summary"));
                 let options = CleanOptions {
                     start_offset: 0,
                     append: false,
                     mbox_file_name: Some(mbox_name),
                     summary_output: Some(summary_output),
-                    index_output: None,
+                    index_output: Some(index_part_output.clone()),
                 };
-                let stats = clean_mbox_file(split_file, &clean_output, &spam_output, &options)
-                    .with_context(|| {
-                        format!("clean failed for split file {}", split_file.display())
-                    })?;
-                clean_processed += stats.processed;
-                clean_written += stats.clean;
-                clean_spam += stats.spam;
-                clean_errors += stats.errors;
-                log_progress(
-                    logs_dir.as_path(),
-                    "clean",
-                    clean_processed,
-                    None,
-                    Some(clean_spam + clean_errors),
-                    Some(clean_errors),
-                );
+                let base_processed = preprocess_processed;
+                let base_written = preprocess_written;
+                let base_spam = preprocess_spam;
+                let base_errors = preprocess_errors;
+                let mut on_progress = |stats: &ragmail_clean::CleanStats| {
+                    let current_processed = base_processed + stats.processed;
+                    let current_spam = base_spam + stats.spam;
+                    let current_errors = base_errors + stats.errors;
+                    log_progress(
+                        logs_dir.as_path(),
+                        "preprocess",
+                        current_processed,
+                        Some(preprocess_total),
+                        Some(current_spam + current_errors),
+                        Some(current_errors),
+                    );
+                    stage_display.update_progress(
+                        "preprocess",
+                        Some(current_processed),
+                        Some(current_spam + current_errors),
+                        Some(HashMap::from([
+                            ("spam".to_string(), Value::from(current_spam)),
+                            ("errors".to_string(), Value::from(current_errors)),
+                        ])),
+                    );
+                };
+                let stats = clean_mbox_file_with_progress(
+                    split_file,
+                    &clean_output,
+                    &spam_output,
+                    &options,
+                    Duration::from_millis(250),
+                    Some(&mut on_progress),
+                )
+                .with_context(|| {
+                    format!("preprocess failed for split file {}", split_file.display())
+                })?;
+                preprocess_processed = base_processed + stats.processed;
+                preprocess_written = base_written + stats.clean;
+                preprocess_spam = base_spam + stats.spam;
+                preprocess_errors = base_errors + stats.errors;
             }
+            merge_index_parts(
+                preprocess_index_parts_dir.as_path(),
+                &split_files,
+                output_index.as_path(),
+            )?;
             Ok(())
         })();
-        if let Err(err) = clean_result {
+        if let Err(err) = preprocess_result {
             log_event(
                 logs_dir.as_path(),
-                "clean",
+                "preprocess",
                 "ERROR",
                 format!("failed: {err}"),
             );
             workspace.update_stage(
-                "clean",
+                "preprocess",
                 "failed",
                 details_map(json!({"error": err.to_string()})),
             )?;
+            if is_interrupted_error(&err) {
+                stage_display
+                    .note("Interrupt received. Finishing current batch and saving checkpoints...");
+                stage_display.update_status("preprocess", "interrupted", None);
+                workspace.update_stage(
+                    "preprocess",
+                    "interrupted",
+                    details_map(json!({"error": err.to_string()})),
+                )?;
+            } else {
+                stage_display.update_status("preprocess", "failed", None);
+            }
             return Err(err);
         }
-        let clean_duration_s = clean_started.elapsed().as_secs_f64();
+        let preprocess_duration_s = preprocess_started.elapsed().as_secs_f64();
         workspace.update_stage(
-            "clean",
+            "preprocess",
             "done",
             details_map(json!({
                 "clean_files": split_files.len(),
-                "processed": clean_processed,
-                "written": clean_written,
-                "skipped": clean_spam + clean_errors,
-                "spam": clean_spam,
-                "errors": clean_errors,
-                "duration_s": clean_duration_s
+                "processed": preprocess_processed,
+                "written": preprocess_written,
+                "skipped": preprocess_spam + preprocess_errors,
+                "spam": preprocess_spam,
+                "errors": preprocess_errors,
+                "index_output": output_index.display().to_string(),
+                "duration_s": preprocess_duration_s
             })),
         )?;
-        println!(
-            "pipeline clean: processed={} clean={} spam={} errors={}",
-            clean_processed, clean_written, clean_spam, clean_errors
-        );
         log_event(
             logs_dir.as_path(),
-            "clean",
+            "preprocess",
             "INFO",
             format!(
                 "done processed={} clean={} spam={} errors={} duration_s={:.3}",
-                clean_processed, clean_written, clean_spam, clean_errors, clean_duration_s
+                preprocess_processed,
+                preprocess_written,
+                preprocess_spam,
+                preprocess_errors,
+                preprocess_duration_s
             ),
         );
-    } else if wants_clean {
-        println!("pipeline clean: skipped");
-        log_event(logs_dir.as_path(), "clean", "INFO", "skipped");
+        stage_display.update_progress(
+            "preprocess",
+            Some(preprocess_processed),
+            Some(preprocess_spam + preprocess_errors),
+            Some(HashMap::from([
+                ("startup_text".to_string(), Value::from("")),
+                ("spam".to_string(), Value::from(preprocess_spam)),
+                ("errors".to_string(), Value::from(preprocess_errors)),
+            ])),
+        );
+        stage_display.update_status("preprocess", "done", Some(preprocess_duration_s));
+    } else if wants_preprocess {
+        log_event(logs_dir.as_path(), "preprocess", "INFO", "skipped");
+        stage_display.update_status("preprocess", "skipped", None);
     }
 
-    let clean_files = collect_clean_files(clean_dir.as_path())?;
+    let clean_source_dir = options.clean_dir.unwrap_or(clean_dir.as_path());
+    let clean_files = collect_clean_files(clean_source_dir)?;
     if (wants_vectorize || wants_ingest) && clean_files.is_empty() {
         log_event(
             logs_dir.as_path(),
-            "clean",
+            "preprocess",
             "ERROR",
             "no clean outputs found",
         );
-        bail!("no clean outputs found in {}", clean_dir.display());
+        bail!("no clean outputs found in {}", clean_source_dir.display());
     }
 
-    let embeddings_dir = workspace.embeddings_dir();
-    let db_path = workspace.db_dir().join("email_search.lancedb");
+    let embeddings_dir = options
+        .embeddings_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.embeddings_dir());
+    let db_path = options
+        .db_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.db_dir().join("email_search.lancedb"));
 
     let vectorize_should_run =
         wants_vectorize && (!resume_effective || !workspace.stage_done("vectorize")?);
@@ -567,6 +1468,17 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
         let vectorize_started = Instant::now();
         log_event(logs_dir.as_path(), "vectorize", "INFO", "start");
         let vectorize_total = count_non_empty_lines_for_paths(&clean_files)?;
+        stage_display.update_status("vectorize", "starting", None);
+        stage_display.set_total("vectorize", vectorize_total);
+        stage_display.update_progress(
+            "vectorize",
+            Some(0),
+            Some(0),
+            Some(HashMap::from([(
+                "startup_text".to_string(),
+                Value::from("initializing vectorization"),
+            )])),
+        );
         workspace.update_stage(
             "vectorize",
             "running",
@@ -575,19 +1487,81 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
         let mut args = vec![
             "--workspace".to_string(),
             options.workspace_name.to_string(),
-            "--resume".to_string(),
-            if resume_effective {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
             "--checkpoint-interval".to_string(),
             options.checkpoint_interval.to_string(),
         ];
+        if resume_effective {
+            args.push("--resume".to_string());
+        } else {
+            args.push("--no-resume".to_string());
+        }
         if let Some(base) = options.base_dir {
             args.extend(["--base-dir".to_string(), base.display().to_string()]);
         }
-        let result = run_python_bridge("vectorize", &args, logs_dir.as_path());
+        if let Some(clean_root) = options.clean_dir {
+            args.extend(["--clean-dir".to_string(), clean_root.display().to_string()]);
+        }
+        args.extend([
+            "--embeddings-dir".to_string(),
+            embeddings_dir.display().to_string(),
+        ]);
+        if let Some(value) = options.ingest_batch_size {
+            args.extend(["--ingest-batch-size".to_string(), value.to_string()]);
+        }
+        if let Some(value) = options.embedding_batch_size {
+            args.extend(["--embedding-batch-size".to_string(), value.to_string()]);
+        }
+        if let Some(value) = options.chunk_size {
+            args.extend(["--chunk-size".to_string(), value.to_string()]);
+        }
+        if let Some(value) = options.chunk_overlap {
+            args.extend(["--chunk-overlap".to_string(), value.to_string()]);
+        }
+        let mut vectorize_running = false;
+        let result = run_python_bridge("vectorize", &args, logs_dir.as_path(), |event| {
+            if event.get("event").and_then(Value::as_str) != Some("progress") {
+                return;
+            }
+            let processed = event.get("processed").and_then(Value::as_u64);
+            let skipped = event.get("skipped").and_then(Value::as_u64).or_else(|| {
+                Some(
+                    event
+                        .get("skipped_exists")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        + event
+                            .get("skipped_errors")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                )
+            });
+            let mut meta = HashMap::new();
+            if let Some(value) = event.get("skipped_exists").and_then(Value::as_u64) {
+                meta.insert("skipped_exists".to_string(), Value::from(value));
+            }
+            if let Some(value) = event.get("skipped_errors").and_then(Value::as_u64) {
+                meta.insert("skipped_errors".to_string(), Value::from(value));
+            }
+            if let Some(value) = event.get("startup_text").and_then(Value::as_str) {
+                meta.insert("startup_text".to_string(), Value::from(value.to_string()));
+            }
+            let has_startup_text = meta
+                .get("startup_text")
+                .and_then(Value::as_str)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            if !vectorize_running && (processed.unwrap_or(0) > 0 || !has_startup_text) {
+                vectorize_running = true;
+                stage_display.update_status("vectorize", "running", None);
+                meta.insert("startup_text".to_string(), Value::from(""));
+            }
+            stage_display.update_progress(
+                "vectorize",
+                processed,
+                skipped,
+                if meta.is_empty() { None } else { Some(meta) },
+            );
+        });
         let value = match result {
             Ok(payload) => payload,
             Err(err) => {
@@ -597,11 +1571,24 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                     "ERROR",
                     format!("failed: {err}"),
                 );
-                workspace.update_stage(
-                    "vectorize",
-                    "failed",
-                    details_map(json!({"error": err.to_string()})),
-                )?;
+                if is_interrupted_error(&err) {
+                    stage_display.note(
+                        "Interrupt received. Finishing current batch and saving checkpoints...",
+                    );
+                    stage_display.update_status("vectorize", "interrupted", None);
+                    workspace.update_stage(
+                        "vectorize",
+                        "interrupted",
+                        details_map(json!({"error": err.to_string()})),
+                    )?;
+                } else {
+                    stage_display.update_status("vectorize", "failed", None);
+                    workspace.update_stage(
+                        "vectorize",
+                        "failed",
+                        details_map(json!({"error": err.to_string()})),
+                    )?;
+                }
                 return Err(err);
             }
         };
@@ -644,12 +1631,31 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                 processed, vectorize_total, files, skipped, errors, vectorize_duration_s
             ),
         );
-        println!(
-            "pipeline vectorize: processed={processed} total={vectorize_total} files={files} skipped={skipped} errors={errors}"
+        let mut meta = HashMap::new();
+        meta.insert(
+            "skipped_exists".to_string(),
+            Value::from(
+                value
+                    .get("skipped_exists")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            ),
         );
+        meta.insert(
+            "skipped_errors".to_string(),
+            Value::from(
+                value
+                    .get("skipped_errors")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(errors),
+            ),
+        );
+        meta.insert("startup_text".to_string(), Value::from(""));
+        stage_display.update_progress("vectorize", Some(processed), Some(skipped), Some(meta));
+        stage_display.update_status("vectorize", "done", Some(vectorize_duration_s));
     } else if wants_vectorize {
         log_event(logs_dir.as_path(), "vectorize", "INFO", "skipped");
-        println!("pipeline vectorize: skipped");
+        stage_display.update_status("vectorize", "skipped", None);
     }
 
     let ingest_should_run =
@@ -658,6 +1664,17 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
         let ingest_started = Instant::now();
         log_event(logs_dir.as_path(), "ingest", "INFO", "start");
         let ingest_total = count_non_empty_lines_for_paths(&clean_files)?;
+        stage_display.update_status("ingest", "starting", None);
+        stage_display.set_total("ingest", ingest_total);
+        stage_display.update_progress(
+            "ingest",
+            Some(0),
+            Some(0),
+            Some(HashMap::from([(
+                "startup_text".to_string(),
+                Value::from("initializing ingest"),
+            )])),
+        );
         workspace.update_stage(
             "ingest",
             "running",
@@ -666,12 +1683,6 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
         let mut args = vec![
             "--workspace".to_string(),
             options.workspace_name.to_string(),
-            "--resume".to_string(),
-            if resume_effective {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            },
             "--db-path".to_string(),
             db_path.display().to_string(),
             "--embeddings-dir".to_string(),
@@ -679,10 +1690,94 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
             "--checkpoint-interval".to_string(),
             options.checkpoint_interval.to_string(),
         ];
+        if resume_effective {
+            args.push("--resume".to_string());
+        } else {
+            args.push("--no-resume".to_string());
+        }
         if let Some(base) = options.base_dir {
             args.extend(["--base-dir".to_string(), base.display().to_string()]);
         }
-        let result = run_python_bridge("ingest", &args, logs_dir.as_path());
+        if let Some(clean_root) = options.clean_dir {
+            args.extend(["--clean-dir".to_string(), clean_root.display().to_string()]);
+        }
+        if options.skip_exists_check {
+            args.extend(["--skip-exists-check".to_string(), "true".to_string()]);
+        }
+        if let Some(value) = options.ingest_batch_size {
+            args.extend(["--ingest-batch-size".to_string(), value.to_string()]);
+        }
+        if let Some(value) = options.embedding_batch_size {
+            args.extend(["--embedding-batch-size".to_string(), value.to_string()]);
+        }
+        if let Some(value) = options.chunk_size {
+            args.extend(["--chunk-size".to_string(), value.to_string()]);
+        }
+        if let Some(value) = options.chunk_overlap {
+            args.extend(["--chunk-overlap".to_string(), value.to_string()]);
+        }
+        if let Some(value) = options.compact_every {
+            args.extend(["--compact-every".to_string(), value.to_string()]);
+        }
+        if !options.repair_embeddings {
+            args.push("--no-repair-embeddings".to_string());
+        }
+        let mut ingest_running = false;
+        let result = run_python_bridge("ingest", &args, logs_dir.as_path(), |event| {
+            match event.get("event").and_then(Value::as_str) {
+                Some("progress") => {
+                    let processed = event.get("processed").and_then(Value::as_u64);
+                    let skipped = event.get("skipped").and_then(Value::as_u64).or_else(|| {
+                        Some(
+                            event
+                                .get("skipped_exists")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0)
+                                + event
+                                    .get("skipped_errors")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0),
+                        )
+                    });
+                    let mut meta = HashMap::new();
+                    if let Some(value) = event.get("skipped_exists").and_then(Value::as_u64) {
+                        meta.insert("skipped_exists".to_string(), Value::from(value));
+                    }
+                    if let Some(value) = event.get("skipped_errors").and_then(Value::as_u64) {
+                        meta.insert("skipped_errors".to_string(), Value::from(value));
+                    }
+                    if let Some(value) = event.get("startup_text").and_then(Value::as_str) {
+                        meta.insert("startup_text".to_string(), Value::from(value.to_string()));
+                    }
+                    let has_startup_text = meta
+                        .get("startup_text")
+                        .and_then(Value::as_str)
+                        .map(|value| !value.trim().is_empty())
+                        .unwrap_or(false);
+                    if !ingest_running && (processed.unwrap_or(0) > 0 || !has_startup_text) {
+                        ingest_running = true;
+                        stage_display.update_status("ingest", "running", None);
+                        meta.insert("startup_text".to_string(), Value::from(""));
+                    }
+                    stage_display.update_progress(
+                        "ingest",
+                        processed,
+                        skipped,
+                        if meta.is_empty() { None } else { Some(meta) },
+                    );
+                }
+                Some("compaction") => {
+                    if !ingest_running {
+                        ingest_running = true;
+                        stage_display.update_status("ingest", "running", None);
+                    }
+                    if let Some(phase) = event.get("phase").and_then(Value::as_str) {
+                        stage_display.note(format!("Ingest {phase}..."));
+                    }
+                }
+                _ => {}
+            }
+        });
         let value = match result {
             Ok(payload) => payload,
             Err(err) => {
@@ -692,11 +1787,24 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                     "ERROR",
                     format!("failed: {err}"),
                 );
-                workspace.update_stage(
-                    "ingest",
-                    "failed",
-                    details_map(json!({"error": err.to_string()})),
-                )?;
+                if is_interrupted_error(&err) {
+                    stage_display.note(
+                        "Interrupt received. Finishing current batch and saving checkpoints...",
+                    );
+                    stage_display.update_status("ingest", "interrupted", None);
+                    workspace.update_stage(
+                        "ingest",
+                        "interrupted",
+                        details_map(json!({"error": err.to_string()})),
+                    )?;
+                } else {
+                    stage_display.update_status("ingest", "failed", None);
+                    workspace.update_stage(
+                        "ingest",
+                        "failed",
+                        details_map(json!({"error": err.to_string()})),
+                    )?;
+                }
                 return Err(err);
             }
         };
@@ -739,19 +1847,37 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
                 processed, ingest_total, files, skipped, errors, ingest_duration_s
             ),
         );
-        println!(
-            "pipeline ingest: processed={processed} total={ingest_total} files={files} skipped={skipped} errors={errors}"
+        let mut meta = HashMap::new();
+        meta.insert(
+            "skipped_exists".to_string(),
+            Value::from(
+                value
+                    .get("skipped_exists")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            ),
         );
+        meta.insert(
+            "skipped_errors".to_string(),
+            Value::from(
+                value
+                    .get("skipped_errors")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(errors),
+            ),
+        );
+        meta.insert("startup_text".to_string(), Value::from(""));
+        stage_display.update_progress("ingest", Some(processed), Some(skipped), Some(meta));
+        stage_display.update_status("ingest", "done", Some(ingest_duration_s));
     } else if wants_ingest {
         log_event(logs_dir.as_path(), "ingest", "INFO", "skipped");
-        println!("pipeline ingest: skipped");
+        stage_display.update_status("ingest", "skipped", None);
     }
 
     let pipeline_duration_s = pipeline_started.elapsed().as_secs_f64();
-    println!(
-        "pipeline complete: workspace={} duration_s={pipeline_duration_s:.3}",
-        workspace_root.display()
-    );
+    stage_display.finish();
+    stage_display.stop_spinner();
+    print_pipeline_summary(&workspace, pipeline_duration_s);
     log_event(
         logs_dir.as_path(),
         "pipeline",
@@ -828,7 +1954,16 @@ fn parse_stage_selection(raw: &str) -> anyhow::Result<BTreeSet<String>> {
         .filter(|value| !value.is_empty())
     {
         match stage {
-            "split" | "index" | "clean" | "vectorize" | "ingest" => {
+            "download" | "model" => {
+                out.insert("model".to_string());
+            }
+            "split" => {
+                out.insert("split".to_string());
+            }
+            "clean" | "index" | "preprocess" => {
+                out.insert("preprocess".to_string());
+            }
+            "vectorize" | "ingest" => {
                 out.insert(stage.to_string());
             }
             other => bail!("unsupported stage for rust pipeline: {other}"),
@@ -936,6 +2071,22 @@ fn count_non_empty_lines_for_paths(paths: &[PathBuf]) -> anyhow::Result<u64> {
     Ok(total)
 }
 
+fn count_mbox_envelopes(path: &Path) -> anyhow::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut total = 0_u64;
+    for line in reader.lines() {
+        let line = line?;
+        if line.starts_with("From ") {
+            total += 1;
+        }
+    }
+    Ok(total)
+}
+
 fn bridge_skipped_total(value: &Value) -> u64 {
     if let Some(skipped) = value.get("skipped").and_then(Value::as_u64) {
         return skipped;
@@ -1007,29 +2158,110 @@ fn should_retry_bridge_failure(exit_code: Option<i32>, stdout: &str, stderr: &st
     .any(|needle| combined.contains(needle))
 }
 
-fn run_python_bridge(stage: &str, args: &[String], logs_dir: &Path) -> anyhow::Result<Value> {
+fn repo_root_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn resolve_python_bridge_bin() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var("RAGMAIL_PY_BRIDGE_BIN") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let sibling = parent.join("ragmail-py");
+            if sibling.is_file() {
+                return Some(sibling);
+            }
+        }
+    }
+
+    let repo_root = repo_root_dir();
+    [
+        repo_root.join(".venv/bin/ragmail-py"),
+        repo_root.join("python/.venv/bin/ragmail-py"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+fn build_python_stage_command(stage: &str) -> ProcessCommand {
+    if let Some(bin) = resolve_python_bridge_bin() {
+        let mut cmd = ProcessCommand::new(bin);
+        cmd.arg("py");
+        cmd.arg(stage);
+        return cmd;
+    }
+
+    let python = std::env::var("RAGMAIL_PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+    let mut cmd = ProcessCommand::new(python);
+    cmd.arg("-m");
+    cmd.arg("ragmail.cli");
+    cmd.arg("py");
+    cmd.arg(stage);
+    cmd.current_dir(repo_root_dir());
+    cmd
+}
+
+fn build_python_passthrough_command(args: &[String]) -> ProcessCommand {
+    if let Some(bin) = resolve_python_bridge_bin() {
+        let mut cmd = ProcessCommand::new(bin);
+        cmd.args(args);
+        return cmd;
+    }
+
+    let python = std::env::var("RAGMAIL_PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
+    let mut cmd = ProcessCommand::new(python);
+    cmd.arg("-m");
+    cmd.arg("ragmail.cli");
+    cmd.args(args);
+    cmd.current_dir(repo_root_dir());
+    cmd
+}
+
+fn spawn_bridge_reader<T: std::io::Read + Send + 'static>(
+    reader: T,
+    is_stderr: bool,
+    tx: mpsc::Sender<(bool, String)>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buf_reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = match buf_reader.read_line(&mut line) {
+                Ok(value) => value,
+                Err(_) => break,
+            };
+            if read == 0 {
+                break;
+            }
+            let _ = tx.send((is_stderr, line.trim_end_matches('\n').to_string()));
+        }
+    })
+}
+
+fn run_python_bridge<F>(
+    stage: &str,
+    args: &[String],
+    logs_dir: &Path,
+    mut on_event: F,
+) -> anyhow::Result<Value>
+where
+    F: FnMut(&Value),
+{
     let max_retries = python_bridge_max_retries();
     let total_attempts = max_retries + 1;
     let base_delay_ms = python_bridge_retry_delay_ms();
     for attempt in 1..=total_attempts {
-        let override_bin = std::env::var("RAGMAIL_PY_BRIDGE_BIN").ok();
-        let mut command = if let Some(bin) = override_bin {
-            let mut cmd = ProcessCommand::new(bin);
-            cmd.arg("py");
-            cmd.arg(stage);
-            cmd
-        } else {
-            let python =
-                std::env::var("RAGMAIL_PYTHON_BIN").unwrap_or_else(|_| "python3".to_string());
-            let mut cmd = ProcessCommand::new(python);
-            cmd.arg("-m");
-            cmd.arg("ragmail.cli");
-            cmd.arg("py");
-            cmd.arg(stage);
-            cmd
-        };
+        let mut command = build_python_stage_command(stage);
         command.args(args);
-        command.current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
         let rendered = format!(
             "{} {}",
             command.get_program().to_string_lossy(),
@@ -1046,7 +2278,7 @@ fn run_python_bridge(stage: &str, args: &[String], logs_dir: &Path) -> anyhow::R
             format!("python bridge command (attempt {attempt}/{total_attempts}): {rendered}"),
         );
 
-        let output = match command.output() {
+        let mut child = match command.spawn() {
             Ok(value) => value,
             Err(err) => {
                 let retryable = matches!(
@@ -1075,12 +2307,84 @@ fn run_python_bridge(stage: &str, args: &[String], logs_dir: &Path) -> anyhow::R
                 });
             }
         };
+        let stdout = child
+            .stdout
+            .take()
+            .context("python bridge missing stdout pipe")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("python bridge missing stderr pipe")?;
+        let (tx, rx) = mpsc::channel::<(bool, String)>();
+        let stdout_handle = spawn_bridge_reader(stdout, false, tx.clone());
+        let stderr_handle = spawn_bridge_reader(stderr, true, tx);
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        if !output.status.success() {
-            let code = output.status.code();
-            let retryable = should_retry_bridge_failure(code, &stdout, &stderr);
+        let mut stdout_text = String::new();
+        let mut stderr_text = String::new();
+        let mut final_payload: Option<Value> = None;
+        while let Ok((is_stderr, line)) = rx.recv() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if is_stderr {
+                stderr_text.push_str(&line);
+                stderr_text.push('\n');
+            } else {
+                stdout_text.push_str(&line);
+                stdout_text.push('\n');
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                if value.get("event").is_some() {
+                    on_event(&value);
+                    if let Some(event) = value.get("event").and_then(Value::as_str) {
+                        if event == "progress" {
+                            if let Some(processed) = value.get("processed").and_then(Value::as_u64)
+                            {
+                                let skipped =
+                                    value.get("skipped").and_then(Value::as_u64).unwrap_or(0);
+                                let errors = value
+                                    .get("errors")
+                                    .and_then(Value::as_u64)
+                                    .or_else(|| value.get("skipped_errors").and_then(Value::as_u64))
+                                    .unwrap_or(0);
+                                log_progress(
+                                    logs_dir,
+                                    stage,
+                                    processed,
+                                    None,
+                                    Some(skipped),
+                                    Some(errors),
+                                );
+                            }
+                        } else if event == "compaction" {
+                            let phase = value
+                                .get("phase")
+                                .and_then(Value::as_str)
+                                .unwrap_or("update");
+                            log_event(logs_dir, stage, "INFO", format!("compaction phase={phase}"));
+                        }
+                    }
+                    continue;
+                }
+                final_payload = Some(value);
+                continue;
+            }
+
+            if is_stderr {
+                log_event(logs_dir, stage, "WARN", format!("python stderr: {line}"));
+            } else {
+                log_event(logs_dir, stage, "INFO", format!("python stdout: {line}"));
+            }
+        }
+        let status = child.wait()?;
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
+        if !status.success() {
+            let code = status.code();
+            if matches!(code, Some(130)) {
+                bail!("python bridge stage '{stage}' interrupted");
+            }
+            let retryable = should_retry_bridge_failure(code, &stdout_text, &stderr_text);
             if retryable && attempt < total_attempts {
                 let delay = retry_delay_for_attempt(attempt, base_delay_ms);
                 log_event(
@@ -1091,7 +2395,7 @@ fn run_python_bridge(stage: &str, args: &[String], logs_dir: &Path) -> anyhow::R
                         "python bridge failed (attempt {attempt}/{total_attempts}, exit {}), retrying in {}ms: stderr='{}'",
                         code.unwrap_or(-1),
                         delay.as_millis(),
-                        stderr.trim()
+                        stderr_text.trim()
                     ),
                 );
                 std::thread::sleep(delay);
@@ -1102,41 +2406,55 @@ fn run_python_bridge(stage: &str, args: &[String], logs_dir: &Path) -> anyhow::R
                 stage,
                 attempt,
                 code.unwrap_or(-1),
-                stdout.trim(),
-                stderr.trim()
+                stdout_text.trim(),
+                stderr_text.trim()
             );
         }
 
-        let mut json_payload = None;
-        for line in stdout.lines().rev() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-                json_payload = Some(value);
-                break;
-            }
-        }
-        let value = json_payload.with_context(|| {
+        let value = final_payload.with_context(|| {
             format!(
                 "python bridge stage '{}' did not emit parseable JSON output: {}",
                 stage,
-                stdout.trim()
+                stdout_text.trim()
             )
         })?;
-        if !stderr.trim().is_empty() {
+        on_event(&value);
+        if !stderr_text.trim().is_empty() {
             log_event(
                 logs_dir,
                 stage,
                 "INFO",
-                format!("python stderr: {}", stderr.trim()),
+                format!("python stderr: {}", stderr_text.trim()),
             );
         }
         return Ok(value);
     }
 
     bail!("python bridge stage '{stage}' failed unexpectedly without output")
+}
+
+fn run_python_passthrough(args: &[String]) -> anyhow::Result<()> {
+    let mut command = build_python_passthrough_command(args);
+    let rendered = format!(
+        "{} {}",
+        command.get_program().to_string_lossy(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let status = command
+        .status()
+        .with_context(|| format!("failed to execute python passthrough command: {rendered}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    bail!(
+        "python passthrough command failed (exit {}): {}",
+        status.code().unwrap_or(-1),
+        rendered
+    );
 }
 
 fn merge_index_parts(
@@ -1178,6 +2496,16 @@ fn main() -> anyhow::Result<()> {
             refresh,
             checkpoint_interval,
             years,
+            clean_dir,
+            embeddings_dir,
+            db_path,
+            ingest_batch_size,
+            embedding_batch_size,
+            chunk_size,
+            chunk_overlap,
+            compact_every,
+            skip_exists_check,
+            no_repair_embeddings,
         }) => {
             let options = PipelineRunOptions {
                 input_mboxes: &input_mbox,
@@ -1188,6 +2516,16 @@ fn main() -> anyhow::Result<()> {
                 refresh,
                 checkpoint_interval,
                 years: &years,
+                clean_dir: clean_dir.as_deref(),
+                embeddings_dir: embeddings_dir.as_deref(),
+                db_path: db_path.as_deref(),
+                ingest_batch_size,
+                embedding_batch_size,
+                chunk_size,
+                chunk_overlap,
+                compact_every,
+                skip_exists_check,
+                repair_embeddings: !no_repair_embeddings,
             };
             run_pipeline(&options)?;
         }
@@ -1256,7 +2594,7 @@ fn main() -> anyhow::Result<()> {
             );
             println!("output={}", output.display());
         }
-        Some(Command::Clean {
+        Some(Command::Preprocess {
             input,
             output_clean,
             output_spam,
@@ -1278,7 +2616,7 @@ fn main() -> anyhow::Result<()> {
                 index_output,
             };
             let stats = clean_mbox_file(&input, &clean_path, &spam_path, &options)
-                .with_context(|| format!("failed to clean input mbox: {}", input.display()))?;
+                .with_context(|| format!("failed to preprocess input mbox: {}", input.display()))?;
             println!(
                 "clean complete: processed={} clean={} spam={} errors={}",
                 stats.processed, stats.clean, stats.spam, stats.errors
@@ -1291,6 +2629,9 @@ fn main() -> anyhow::Result<()> {
             if let Some(index_path) = options.index_output {
                 println!("index_output={}", index_path.display());
             }
+        }
+        Some(Command::Passthrough(args)) => {
+            run_python_passthrough(&args)?;
         }
         Some(Command::Version) | None => {
             println!("{APP_VERSION}");
@@ -1390,11 +2731,21 @@ exit 1
             input_mboxes: &inputs,
             workspace_name: "rs-pipeline-state",
             base_dir: Some(temp.as_path()),
-            stages_raw: "split,index,clean",
+            stages_raw: "split,preprocess",
             resume: false,
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         run_pipeline(&options).expect("pipeline run");
 
@@ -1404,8 +2755,7 @@ exit 1
         assert!(root.join("split/mbox_index.jsonl").exists());
         assert!(root.join("logs/pipeline.log").exists());
         assert!(root.join("logs/split.log").exists());
-        assert!(root.join("logs/index.log").exists());
-        assert!(root.join("logs/clean.log").exists());
+        assert!(root.join("logs/preprocess.log").exists());
         let clean_count = std::fs::read_dir(root.join("clean"))
             .expect("clean dir")
             .filter_map(Result::ok)
@@ -1429,7 +2779,7 @@ exit 1
 
         let state_raw = std::fs::read_to_string(root.join("state.json")).expect("state");
         let state: Value = serde_json::from_str(&state_raw).expect("state json");
-        for stage in ["split", "index", "clean"] {
+        for stage in ["split", "preprocess"] {
             let stage_entry = state
                 .get("stages")
                 .and_then(Value::as_object)
@@ -1474,6 +2824,16 @@ exit 1
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         run_pipeline(&first).expect("first run");
         let state_path = temp.join("rs-pipeline-resume/state.json");
@@ -1487,6 +2847,16 @@ exit 1
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         run_pipeline(&second).expect("resume run");
         let after = std::fs::read_to_string(state_path).expect("state after");
@@ -1511,6 +2881,16 @@ exit 1
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         run_pipeline(&first).expect("first run");
         let second = PipelineRunOptions {
@@ -1522,6 +2902,16 @@ exit 1
             refresh: true,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         run_pipeline(&second).expect("refresh run");
 
@@ -1572,6 +2962,16 @@ exit 1
             refresh: false,
             checkpoint_interval: 5,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         std::env::remove_var("RAGMAIL_PY_BRIDGE_BIN");
@@ -1647,6 +3047,14 @@ exit 1
             "expected vectorize call"
         );
         assert!(args_lines.contains("py ingest"), "expected ingest call");
+        assert!(
+            args_lines.contains("--no-resume"),
+            "expected explicit click boolean flag for resume=false"
+        );
+        assert!(
+            !args_lines.contains("--resume true") && !args_lines.contains("--resume false"),
+            "must not pass click boolean options as extra positional values"
+        );
         assert!(workspace_root.join("logs/vectorize.log").exists());
         assert!(workspace_root.join("logs/ingest.log").exists());
         let _ = std::fs::remove_dir_all(temp);
@@ -1666,6 +3074,16 @@ exit 1
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
 
         let result = run_pipeline(&options);
@@ -1737,6 +3155,16 @@ echo '{"status":"ok","stage":"ingest","processed":0,"files":0}'
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         std::env::remove_var("RAGMAIL_PY_BRIDGE_BIN");
@@ -1827,6 +3255,16 @@ exit 1
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         std::env::remove_var("RAGMAIL_PY_BRIDGE_BIN");
@@ -1904,6 +3342,16 @@ exit 2
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         std::env::remove_var("RAGMAIL_PY_BRIDGE_BIN");
@@ -1972,6 +3420,16 @@ echo '{"status":"ok","stage":"vectorize","processed":0,"files":0}'
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         std::env::remove_var("RAGMAIL_PY_BRIDGE_BIN");
@@ -2059,6 +3517,16 @@ exit 1
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         std::env::remove_var("RAGMAIL_PY_BRIDGE_BIN");
@@ -2140,6 +3608,16 @@ exit 2
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         std::env::remove_var("RAGMAIL_PY_BRIDGE_BIN");
@@ -2168,11 +3646,11 @@ exit 2
 
     #[cfg(unix)]
     #[test]
-    fn pipeline_marks_index_failed_on_unreadable_split_file() {
+    fn pipeline_marks_preprocess_failed_for_index_alias_on_unreadable_split_file() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = temp_base("index-fail");
-        let workspace_root = temp.join("rs-pipeline-index-fail");
+        let temp = temp_base("preprocess-index-alias-fail");
+        let workspace_root = temp.join("rs-pipeline-preprocess-index-alias-fail");
         let split_dir = workspace_root.join("split");
         std::fs::create_dir_all(&split_dir).expect("split dir");
         let split_file = split_dir.join("2024-01.mbox");
@@ -2187,13 +3665,23 @@ exit 2
 
         let options = PipelineRunOptions {
             input_mboxes: &[],
-            workspace_name: "rs-pipeline-index-fail",
+            workspace_name: "rs-pipeline-preprocess-index-alias-fail",
             base_dir: Some(temp.as_path()),
             stages_raw: "index",
             resume: false,
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         let mut restore = std::fs::metadata(&split_file)
@@ -2201,19 +3689,22 @@ exit 2
             .permissions();
         restore.set_mode(0o644);
         let _ = std::fs::set_permissions(&split_file, restore);
-        assert!(result.is_err(), "expected index failure");
+        assert!(result.is_err(), "expected preprocess failure");
 
         let state_raw =
             std::fs::read_to_string(workspace_root.join("state.json")).expect("state json");
         let state: Value = serde_json::from_str(&state_raw).expect("state parsed");
-        let index = state
+        let preprocess = state
             .get("stages")
             .and_then(Value::as_object)
-            .and_then(|stages| stages.get("index"))
+            .and_then(|stages| stages.get("preprocess"))
             .and_then(Value::as_object)
-            .expect("index stage");
-        assert_eq!(index.get("status").and_then(Value::as_str), Some("failed"));
-        let error = index
+            .expect("preprocess stage");
+        assert_eq!(
+            preprocess.get("status").and_then(Value::as_str),
+            Some("failed")
+        );
+        let error = preprocess
             .get("details")
             .and_then(Value::as_object)
             .and_then(|details| details.get("error"))
@@ -2221,18 +3712,18 @@ exit 2
             .unwrap_or_default();
         assert!(
             !error.is_empty(),
-            "index failure should include error detail"
+            "preprocess failure should include error detail"
         );
         let _ = std::fs::remove_dir_all(temp);
     }
 
     #[cfg(unix)]
     #[test]
-    fn pipeline_marks_clean_failed_on_unreadable_split_file() {
+    fn pipeline_marks_preprocess_failed_for_clean_alias_on_unreadable_split_file() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = temp_base("clean-fail");
-        let workspace_root = temp.join("rs-pipeline-clean-fail");
+        let temp = temp_base("preprocess-clean-alias-fail");
+        let workspace_root = temp.join("rs-pipeline-preprocess-clean-alias-fail");
         let split_dir = workspace_root.join("split");
         std::fs::create_dir_all(&split_dir).expect("split dir");
         let split_file = split_dir.join("2024-01.mbox");
@@ -2247,13 +3738,23 @@ exit 2
 
         let options = PipelineRunOptions {
             input_mboxes: &[],
-            workspace_name: "rs-pipeline-clean-fail",
+            workspace_name: "rs-pipeline-preprocess-clean-alias-fail",
             base_dir: Some(temp.as_path()),
             stages_raw: "clean",
             resume: false,
             refresh: false,
             checkpoint_interval: 1,
             years: &[],
+            clean_dir: None,
+            embeddings_dir: None,
+            db_path: None,
+            ingest_batch_size: None,
+            embedding_batch_size: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            compact_every: None,
+            skip_exists_check: false,
+            repair_embeddings: true,
         };
         let result = run_pipeline(&options);
         let mut restore = std::fs::metadata(&split_file)
@@ -2261,19 +3762,22 @@ exit 2
             .permissions();
         restore.set_mode(0o644);
         let _ = std::fs::set_permissions(&split_file, restore);
-        assert!(result.is_err(), "expected clean failure");
+        assert!(result.is_err(), "expected preprocess failure");
 
         let state_raw =
             std::fs::read_to_string(workspace_root.join("state.json")).expect("state json");
         let state: Value = serde_json::from_str(&state_raw).expect("state parsed");
-        let clean = state
+        let preprocess = state
             .get("stages")
             .and_then(Value::as_object)
-            .and_then(|stages| stages.get("clean"))
+            .and_then(|stages| stages.get("preprocess"))
             .and_then(Value::as_object)
-            .expect("clean stage");
-        assert_eq!(clean.get("status").and_then(Value::as_str), Some("failed"));
-        let error = clean
+            .expect("preprocess stage");
+        assert_eq!(
+            preprocess.get("status").and_then(Value::as_str),
+            Some("failed")
+        );
+        let error = preprocess
             .get("details")
             .and_then(Value::as_object)
             .and_then(|details| details.get("error"))
@@ -2281,7 +3785,7 @@ exit 2
             .unwrap_or_default();
         assert!(
             !error.is_empty(),
-            "clean failure should include error detail"
+            "preprocess failure should include error detail"
         );
         let _ = std::fs::remove_dir_all(temp);
     }

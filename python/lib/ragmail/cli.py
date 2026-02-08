@@ -7,6 +7,8 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import click
@@ -17,9 +19,9 @@ from ragmail.ignorelist import (
     load_ignore_list,
     write_ignore_list_template,
 )
-from ragmail.pipeline import run_pipeline
+from ragmail.pipeline import run_pipeline, _path_size_bytes, _warmup_dependencies
 from ragmail.mbox_index import read_message_bytes
-from ragmail.workspace import get_workspace
+from ragmail.workspace import default_cache_root, get_workspace
 
 def _run_module(module: str, args: list[str]) -> None:
     cmd = [sys.executable, "-m", module, *args]
@@ -368,9 +370,77 @@ def _collect_clean_files(clean_root: Path) -> list[Path]:
     return sorted(clean_root.glob("*.clean.jsonl"))
 
 
+def _bridge_emit(payload: dict[str, object]) -> None:
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
 @cli.group("py")
 def py_bridge() -> None:
     """Internal Python bridge commands used by Rust orchestration."""
+
+
+@py_bridge.command("model")
+@click.option("--workspace", "workspace_name", required=True, help="Workspace name")
+@click.option("--base-dir", type=click.Path(path_type=Path), help="Workspace base directory")
+@click.option("--cache-dir", type=click.Path(path_type=Path), help="Shared cache directory")
+def py_model(workspace_name: str, base_dir: Path | None, cache_dir: Path | None) -> None:
+    """Contract command for Rust -> Python model warmup stage."""
+    ws = get_workspace(workspace_name, base_dir=base_dir)
+    ws.ensure()
+    ws.apply_env(cache_dir=cache_dir, base_dir=base_dir)
+
+    cache_root = cache_dir or default_cache_root(base_dir)
+    before_bytes = _path_size_bytes(cache_root)
+    started = time.monotonic()
+    warmup_error: BaseException | None = None
+
+    def _warmup_runner() -> None:
+        nonlocal warmup_error
+        try:
+            _warmup_dependencies()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            warmup_error = exc
+
+    warmup_thread = threading.Thread(target=_warmup_runner, daemon=True)
+    warmup_thread.start()
+    while warmup_thread.is_alive():
+        current_bytes = _path_size_bytes(cache_root)
+        _bridge_emit(
+            {
+                "event": "progress",
+                "stage": "model",
+                "downloaded_bytes": max(0, current_bytes - before_bytes),
+                "cache_bytes": current_bytes,
+                "elapsed_s": max(0.0, time.monotonic() - started),
+            }
+        )
+        warmup_thread.join(timeout=0.5)
+    warmup_thread.join()
+    if warmup_error is not None:
+        raise warmup_error
+
+    after_bytes = _path_size_bytes(cache_root)
+    _bridge_emit(
+        {
+            "event": "progress",
+            "stage": "model",
+            "downloaded_bytes": max(0, after_bytes - before_bytes),
+            "cache_bytes": after_bytes,
+            "elapsed_s": max(0.0, time.monotonic() - started),
+        }
+    )
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "stage": "model",
+                "workspace": workspace_name,
+                "downloaded_bytes": max(0, after_bytes - before_bytes),
+                "cache_bytes": after_bytes,
+            }
+        )
+    )
 
 
 @py_bridge.command("vectorize")
@@ -411,12 +481,24 @@ def py_vectorize(
     embeddings_root = embeddings_dir or ws.embeddings_dir
     from ragmail.vectorize.run import vectorize_files
 
+    def _progress(payload: dict) -> None:
+        _bridge_emit({"event": "progress", "stage": "vectorize", **payload})
+
+    _bridge_emit(
+        {
+            "event": "progress",
+            "stage": "vectorize",
+            "processed": 0,
+            "startup_text": "initializing vectorization",
+        }
+    )
     processed = vectorize_files(
         clean_files,
         output_dir=embeddings_root,
         checkpoint_dir=ws.checkpoints_dir / "vectorize",
         errors_path=ws.logs_dir / "vectorize.errors.jsonl",
         resume=resume,
+        progress_callback=_progress,
         quiet=True,
         vectorize_batch_size=ingest_batch_size,
         embedding_batch_size=embedding_batch_size,
@@ -526,6 +608,21 @@ def py_ingest(
         skip_exists_value = skip_exists_check == "true"
 
     db_target = db_path or (ws.db_dir / "email_search.lancedb")
+
+    def _progress(payload: dict) -> None:
+        _bridge_emit({"event": "progress", "stage": "ingest", **payload})
+
+    def _compaction(payload: dict) -> None:
+        _bridge_emit({"event": "compaction", "stage": "ingest", **payload})
+
+    _bridge_emit(
+        {
+            "event": "progress",
+            "stage": "ingest",
+            "processed": 0,
+            "startup_text": "initializing ingest",
+        }
+    )
     processed = ingest_files_from_embeddings(
         clean_files,
         embeddings_dir=embeddings_root,
@@ -533,6 +630,7 @@ def py_ingest(
         checkpoint_dir=ws.checkpoints_dir,
         errors_path=ws.logs_dir / "ingest.errors.jsonl",
         resume=resume,
+        progress_callback=_progress,
         quiet=True,
         skip_exists_check=skip_exists_value,
         ingest_batch_size=ingest_batch_size,
@@ -541,6 +639,7 @@ def py_ingest(
         chunk_overlap=chunk_overlap,
         checkpoint_interval=checkpoint_interval,
         compact_every=compact_every,
+        compaction_callback=_compaction,
         bulk_import=bulk_import,
         repair_missing_embeddings=repair_embeddings,
     )

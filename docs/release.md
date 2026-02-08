@@ -15,13 +15,16 @@ Checks include:
 - clean git tree
 - Rust fmt + clippy (`-D warnings`) + Rust tests
 - Python tests from `.venv`
-- release binary build and binary version match (`ragmail-rs version == VERSION`)
+- release binary build and binary version match (`ragmail version == VERSION`)
+- PyInstaller bridge build and version match (`ragmail-py --version` matches `VERSION`)
 
 3. Build host artifacts:
 
 ```bash
 just release-artifacts
 ```
+
+Artifacts are written to `releases/` by default.
 
 Optional local smoke validation (artifact naming/checksum/formula path):
 
@@ -67,9 +70,13 @@ Generated assets:
 - Linux tarballs (`amd64`, `arm64`)
 - Linux `.deb` packages (`amd64`, `arm64`)
 - `SHA256SUMS`
-- Homebrew formula (`ragmail-rs.rb`)
+- Homebrew formula (`ragmail.rb`)
 
-Linux `arm64` builds are cross-compiled on `ubuntu-latest` with `gcc-aarch64-linux-gnu`, so release packaging does not require a dedicated ARM GitHub runner.
+Each release tarball includes:
+- `ragmail` (Rust entrypoint CLI)
+- `ragmail-py` (standalone Python bridge built by PyInstaller)
+
+Linux `arm64` builds run on native ARM runners (`ubuntu-24.04-arm`) so both binaries are host-native.
 
 ## Homebrew tap automation
 
@@ -77,4 +84,4 @@ To auto-publish formula updates on release:
 - Set Actions variable `HOMEBREW_TAP_REPO` to `<owner>/<tap-repo>`.
 - Set Actions secret `HOMEBREW_TAP_TOKEN` with push rights to that repo.
 
-The workflow writes `Formula/ragmail-rs.rb` in the tap repo.
+The workflow writes `Formula/ragmail.rb` in the tap repo.

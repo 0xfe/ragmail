@@ -100,6 +100,7 @@ def run_iteration(
         lib_path if not existing_pythonpath else f"{lib_path}{os.pathsep}{existing_pythonpath}"
     )
     if rust_bin is not None:
+        env["RAGMAIL_BIN"] = str(rust_bin)
         env["RAGMAIL_RS_BIN"] = str(rust_bin)
 
     cmd = [
@@ -173,8 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stages",
-        default="split,index,clean",
-        help="Pipeline stages to benchmark (default: split,index,clean)",
+        default="split,preprocess",
+        help="Pipeline stages to benchmark (default: split,preprocess)",
     )
     parser.add_argument(
         "--checkpoint-interval",
@@ -186,12 +187,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--rust-bin",
         type=Path,
         default=None,
-        help="Optional path to ragmail-rs binary (sets RAGMAIL_RS_BIN)",
+        help="Optional path to ragmail binary (sets RAGMAIL_RS_BIN)",
     )
     parser.add_argument(
         "--build-rust-bin",
         action="store_true",
-        help="Build debug ragmail-rs binary before running benchmark",
+        help="Build debug ragmail binary before running benchmark",
     )
     parser.add_argument(
         "--keep-workspaces",
@@ -235,7 +236,7 @@ def summarize(rows: list[IterationResult]) -> dict[str, Any]:
         out["bytes_per_s"]["stdev"] = statistics.stdev(byte_rate)
 
     stage_summary: dict[str, dict[str, float]] = {}
-    for stage in ("split", "index", "clean"):
+    for stage in ("split", "preprocess"):
         stage_values = [
             value for value in (row.stage_durations.get(stage) for row in rows) if value is not None
         ]
@@ -287,12 +288,12 @@ def main() -> int:
             cwd=repo_root,
             check=True,
         )
-        default_bin = repo_root / "rust/target/debug/ragmail-rs"
+        default_bin = repo_root / "rust/target/debug/ragmail"
         if default_bin.exists():
             rust_bin = default_bin
 
     if rust_bin is None:
-        candidate = repo_root / "rust/target/debug/ragmail-rs"
+        candidate = repo_root / "rust/target/debug/ragmail"
         if candidate.exists():
             rust_bin = candidate
 

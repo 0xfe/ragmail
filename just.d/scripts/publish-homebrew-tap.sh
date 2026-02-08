@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: publish-homebrew-tap.sh \
-  --formula /path/to/ragmail-rs.rb \
+  --formula /path/to/ragmail.rb \
   --tap-repo owner/repo|file:///path/to/repo|/path/to/repo \
   --version X.Y.Z \
   [--token <github-token>]
@@ -75,7 +75,7 @@ fi
 
 git clone "${clone_url}" "${tmp_dir}/tap" >/dev/null 2>&1
 mkdir -p "${tmp_dir}/tap/Formula"
-cp "${formula}" "${tmp_dir}/tap/Formula/ragmail-rs.rb"
+cp "${formula}" "${tmp_dir}/tap/Formula/ragmail.rb"
 
 cd "${tmp_dir}/tap"
 if git diff --quiet; then
@@ -85,7 +85,7 @@ fi
 
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
-git add Formula/ragmail-rs.rb
-git commit -m "ragmail-rs ${version}" >/dev/null
+git add Formula/ragmail.rb
+git commit -m "ragmail ${version}" >/dev/null
 git push >/dev/null
-echo "Published Formula/ragmail-rs.rb to ${tap_repo}"
+echo "Published Formula/ragmail.rb to ${tap_repo}"

@@ -1,107 +1,103 @@
-# ragmail Rust-First Migration Plan
+# Rust-First Harness Plan
 
 ## Status
-- Date: 2026-02-06
+- Date: 2026-02-07
 - Branch: `rust-migration`
-- State: `M1`-`M6` complete; `M7` and `M8` in progress.
+- Overall state: `M0`-`M3` complete, `M4`-`M5` in progress.
 - Current focus:
-  - Validate distribution pipeline end-to-end (`M7`).
-  - Expand corpus-scale robustness verification (`M8`).
-- Maintenance note: keep `/Users/mo/.codex/worktrees/edd5/ragmail/todo.md` updated with improvements, risks, and follow-up opportunities.
+  - Finish release/distribution hardening around `ragmail` + `ragmail-py`.
+  - Finalize Rust pipeline UX parity (live stage display + streamed Python progress + logs).
+  - Track remaining robustness items in `todo.md`.
+- Maintenance note: keep `/Users/mo/.codex/worktrees/edd5/ragmail/todo.md` updated with prioritized risk/robustness items while milestones progress.
 
 ## Milestones
 
-### M0 - Design & Contracts (complete)
-- Freeze workspace/stage contracts and schema invariants.
-- Define Rust/Python boundary: Rust for MBOX-heavy stages, Python for embeddings/LLM/search.
+### M0 - Contract Reset and Plan Baseline
+- Define new harness contract: Rust is the only public CLI entrypoint.
+- Confirm Python boundary: only model warmup, vectorize, ingest, search/API helpers.
+- Recreate active planning/tracking docs (`plan.md`, `todo.md`) with current status.
 
-### M1 - Rust Workspace Scaffold (complete)
-- Rust workspace crates and version plumbing.
-- `just`-based build/lint/test/release scaffolding.
+### M1 - Rust Entrypoint and Stage Orchestration
+- Rename Rust binary to `ragmail`.
+- Make Rust pipeline stage model canonical (`model,split,preprocess,vectorize,ingest`).
+- Remove standalone `index` pipeline stage and produce `mbox_index.jsonl` during `preprocess`.
+- Add Rust passthrough commands for Python-backed features (`search`, `stats`, `dedupe`, `serve`, etc.).
 
-### M2 - Rust Split/Index Core (complete)
-- Streaming split with checkpointed resume.
-- Rust index build with per-part checkpointing + merge.
-- Robust interruption/resume and idempotency coverage.
+### M2 - Python Bridge Packaging Boundary
+- Add dedicated Python bridge command surface for Rust invocation (`py model|vectorize|ingest`).
+- Add PyInstaller build flow for bridge executable (`ragmail-py`).
+- Make Rust bridge resolution prefer packaged `ragmail-py`, with source-dev fallback.
 
-### M3 - Rust Clean Stage (complete)
-- Rust cleaner with summary output and tested contract behavior.
-- Historical fixture coverage for edge cases.
+### M3 - Developer Build UX
+- Keep `just bootstrap` as one-step local setup.
+- Ensure `.venv/bin/ragmail` resolves to Rust binary after bootstrap.
+- Keep Python env bootstrap robust (`uv` preferred, `venv`+`pip` fallback).
 
-### M4 - Rust Pipeline Orchestrator (complete)
-- Stage state/log/duration parity.
-- Refresh/archive semantics and failure-state recording.
+### M4 - Versioned Release Artifacts
+- Emit versioned artifacts under `releases/`.
+- Bundle Rust CLI + Python bridge binary for dependency-free execution.
+- Update Linux package/homebrew tooling to distribute the new binary names.
+- Preserve strict release checks: clean git tree, lint/tests pass, version-tag consistency.
 
-### M5 - Python Boundary Hardening (complete)
-- Stable Python bridge commands for vectorize/ingest.
-- Retry/backoff and failure classification coverage.
-
-### M6 - Build/Release/Versioning (complete)
-- Root `VERSION` source of truth.
-- One-command patch bump and strict release checks.
-- Annotated version tagging and release artifact scripts.
-
-### M7 - Distribution (in progress)
-- Tag-driven release artifacts for macOS and Linux.
-- Linux arm64 cross-compile path.
-- Homebrew formula and tap publish automation.
-- Remaining: real-tag and real-credential validation.
-
-### M8 - Docs/AI State/Hardening (in progress)
-- Rust-only docs/skills/tests alignment.
-- Corpus-scale robustness and benchmark floor calibration.
-
-## Architecture (Current)
-- Rust-backed stages only: `split`, `preprocess` (clean + index in one pass).
-- Python stages: `vectorize`, `ingest`, `search`, API/LLM.
-- Legacy Python split/clean/index code paths removed.
-- Legacy stage-selection flags removed from CLI.
-
-## Next Steps
-1. Validate CI release workflow on real release tags.
-2. Validate Homebrew tap automation with real credentials.
-3. Validate Linux arm64 artifacts on real arm64 hosts.
-4. Raise benchmark floor from smoke level after baseline collection.
+### M5 - Docs, Skills, AI State, and Hardening
+- Update README + docs to Rust-first harness and packaging model.
+- Update AGENTS/skill docs where behavior changed.
+- Update `ai-state.md` for stage/runtime/layout invariants.
+- Expand tests for new CLI/bridge/release contracts.
 
 ## Progress Log
 
-### 2026-02-06
-- Fixed split-stage file descriptor exhaustion on large, multi-year mailboxes by capping open monthly writers and evicting+flushing least-recently-used handles in `ragmail-mbox`.
-- Hardened split checkpoint semantics by flushing active writers before checkpoint writes to avoid checkpoint-ahead-of-disk data-loss windows on interruption.
-- Added regression coverage for low writer limits across many month partitions.
-- Refactored pipeline stage model to `model -> split -> preprocess -> vectorize -> ingest`.
-- Removed standalone pipeline `index` stage; `preprocess` now writes per-file index parts and merges to `split/mbox_index.jsonl`.
-- Added preprocess parallelism control (`--preprocess-workers`, `EMAIL_SEARCH_PREPROCESS_WORKERS`) and defaulted to safe single-worker behavior.
-- Fixed Rust clean panic on long blank-line runs (`u8` overflow), and reduced per-line allocations in body normalization.
-- Updated Python and Rust tests for preprocess semantics; validated full Rust/Python suites and rustfmt/clippy gates.
-- Updated docs/skills references from `index`/`clean` stage language to `preprocess`.
-- Removed legacy Python split/clean modules and fallback branches.
-- Removed legacy CLI toggles for Rust stage selection.
-- Simplified Python index helper to read-only lookup functions.
-- Updated tests to Rust-only contracts and robustness checks.
-- Updated README/skills/design docs and AI state for the Rust-only stage model.
-- Reworked benchmark tooling and CI benchmark gate to Rust-only throughput floor.
-- Moved Python project under `python/`:
-  - `lib/` -> `python/lib/`
-  - `tests/` -> `python/tests/`
-  - `pytest.ini` -> `python/pytest.ini`
-  - `pyproject.toml` -> `python/pyproject.toml`
-  - `uv.lock` -> `python/uv.lock`
-  - `requirements.txt` -> `python/requirements.txt`
-  - Updated pytest config and `uv`/CI/just tooling to use the `python/` project layout.
-- Fixed Python-to-Rust repo-root resolution after project relocation by resolving root via `rust/Cargo.toml` discovery in `python/lib/ragmail/pipeline.py`.
-- Updated ragmail skill DB reference docs to `python/lib/ragmail/*` paths.
-- Updated Rust/Python fixture references to `python/tests/fixtures` after test relocation.
-- Rewrote user-facing docs set for the Rust-first architecture:
-  - Simplified `README.md` with clear user flow sections.
-  - Added `docs/pipeline.md` deep dive with stage behavior and practical command recipes.
-  - Reworked `docs/DESIGN.md` for high-level technical architecture.
-  - Added `docs/developers.md` with build/test/debug and iteration guidance.
-- Fixed bootstrap UX and prebuild behavior:
-  - `just bootstrap` now uses a shared root `.venv` and builds the Rust workspace.
-  - Added robust Python bootstrap fallback script (`just.d/scripts/bootstrap-python.sh`).
-  - Python pipeline now prefers prebuilt `rust/target/debug/ragmail-rs` before `cargo run`.
-- Validated relocation with full test gates:
-  - `./just.d/scripts/test-python.sh` -> 118 passed, 6 skipped
-  - `cargo test --manifest-path rust/Cargo.toml --workspace` -> all passed
-  - `just lint` (`cargo fmt --check` + `cargo clippy -D warnings`) -> passed
+### 2026-02-07
+- Replaced stale root planning files with a new Rust-entrypoint migration plan.
+- Established milestone sequence (`M0`..`M5`) and explicit tracking rules.
+- Began implementing `M1` (Rust binary + stage orchestration updates).
+- Completed Rust entrypoint migration:
+  - Rust CLI renamed to `ragmail`.
+  - Pipeline stage contract normalized to `model,split,preprocess,vectorize,ingest`.
+  - Preprocess now emits `mbox_index.jsonl` in one pass.
+  - Added Rust passthrough handling for Python-owned CLI commands.
+- Completed Python bridge boundary updates:
+  - Added `py model` bridge command.
+  - Added bridge resolution preference for packaged/sibling `ragmail-py`.
+  - Added PyInstaller build script and entrypoint (`build-python-bridge.sh`).
+- Completed dev workflow hardening:
+  - `just bootstrap` now links `.venv/bin/ragmail` to Rust debug binary.
+  - Bootstrap fallback made resilient in sandbox/offline-like environments.
+- Advanced release tooling migration:
+  - Artifacts default to `releases/`.
+  - Tarballs include `ragmail` + `ragmail-py`.
+  - Debian/homebrew naming moved from `ragmail-rs` to `ragmail`.
+  - Release CI workflow updated for per-platform Rust + bridge builds.
+- Updated AI/docs/tests to new contracts:
+  - `ai-state.md` refreshed for current architecture.
+  - `AGENTS.md`, `docs/DESIGN.md`, `docs/developers.md`, `docs/release.md` updated.
+  - Rust and Python suites passing after migration updates.
+- Added Rust pipeline UX parity work (in progress):
+  - Rust `pipeline` now prints Python-style header + live stage area with colors/spinners/progress text.
+  - Rust now renders `model` stage as downloaded/cache bytes instead of `0/1`.
+  - Python bridge commands emit streaming JSON events (`event=progress|compaction`) before final result JSON.
+  - Rust bridge execution now streams child stdout/stderr, parses event JSON incrementally, updates UI live, and logs event lines to stage logs.
+  - Added bridge contract tests for streamed progress/compaction events.
+  - Validation run: `cargo test -p ragmail-cli`, `cargo clippy -p ragmail-cli -- -D warnings`, `pytest python/tests/test_python_bridge_contracts.py`, `pytest python/tests/test_rust_pipeline_bridge.py`.
+- Continued UX fixes for stalled-looking stages:
+  - Added in-loop Rust progress callbacks for `split` and `preprocess` so large single files update continuously.
+  - Added `model` elapsed heartbeat in progress events when download byte deltas stay flat due to cache hits.
+  - Verified live increments with a larger synthetic MBOX run and re-ran Rust/Python test suites + clippy.
+- Closed additional pipeline UX/bridge correctness gaps:
+  - `model` stage now displays status `downloading` while active (not `running`).
+  - Added explicit `starting` startup display text for `split` and `preprocess` before first measurable progress event.
+  - Fixed Rust -> Python Click boolean forwarding for bridge stages to use flags (`--resume`/`--no-resume`) instead of invalid extra args (`--resume true|false`).
+  - Added regression assertion in Rust CLI tests to prevent boolean-flag regressions.
+  - Validation run:
+    - `cargo test -p ragmail-cli`
+    - `cargo clippy -p ragmail-cli -- -D warnings`
+    - `.venv/bin/python -m pytest python/tests/test_python_bridge_contracts.py python/tests/test_rust_pipeline_bridge.py`
+- Improved vectorize/ingest startup visibility:
+  - `vectorize` and `ingest` now enter `starting` status before `running`.
+  - Rust stage UI now consumes `startup_text` from bridge progress events for these stages.
+  - Python bridge now emits explicit startup progress events for `py vectorize` and `py ingest`.
+  - Vectorize runtime now emits heartbeat progress during embedding-model load and first-batch buildup so long initialization does not appear hung.
+  - Validation run:
+    - `cargo test -p ragmail-cli`
+    - `cargo clippy -p ragmail-cli -- -D warnings`
+    - `.venv/bin/python -m pytest python/tests/test_python_bridge_contracts.py python/tests/test_rust_pipeline_bridge.py`

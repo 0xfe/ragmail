@@ -51,7 +51,7 @@ if ! grep -q " ${tarball}$" "${tmp_dir}/SHA256SUMS"; then
 fi
 
 tarball_sha="$(shasum -a 256 "${tmp_dir}/${tarball}" | awk '{print $1}')"
-formula_path="${tmp_dir}/ragmail-rs.rb"
+formula_path="${tmp_dir}/ragmail.rb"
 ./just.d/scripts/generate-homebrew-formula.sh \
   --version "${version}" \
   --repo "example/ragmail" \
@@ -59,8 +59,8 @@ formula_path="${tmp_dir}/ragmail-rs.rb"
   --macos-arm64-sha "${tarball_sha}" \
   --output "${formula_path}"
 
-if ! grep -q 'class RagmailRs < Formula' "${formula_path}"; then
-  echo "generated formula missing RagmailRs class" >&2
+if ! grep -q 'class Ragmail < Formula' "${formula_path}"; then
+  echo "generated formula missing Ragmail class" >&2
   exit 1
 fi
 

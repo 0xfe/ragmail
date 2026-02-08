@@ -5,9 +5,9 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 venv_python="${repo_root}/.venv/bin/python"
 
-# Keep the rust bridge binary current so preprocess/index tests do not execute a stale CLI.
+# Keep the rust bridge binary current so preprocess tests do not execute a stale CLI.
 if command -v cargo >/dev/null 2>&1; then
-  cargo build --manifest-path "${repo_root}/rust/Cargo.toml" --bin ragmail-rs >/dev/null
+  cargo build --manifest-path "${repo_root}/rust/Cargo.toml" --bin ragmail >/dev/null
 fi
 
 if [[ -x "${venv_python}" ]]; then

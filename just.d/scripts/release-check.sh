@@ -33,9 +33,18 @@ fi
 
 cargo build --manifest-path rust/Cargo.toml --release -p ragmail-cli
 
-bin_version="$(rust/target/release/ragmail-rs version | tr -d '[:space:]')"
+bin_version="$(rust/target/release/ragmail version | tr -d '[:space:]')"
 if [[ "${bin_version}" != "${version}" ]]; then
   echo "Release check failed: binary version '${bin_version}' does not match VERSION '${version}'." >&2
+  exit 1
+fi
+
+bridge_tmp="$(mktemp -d)"
+trap 'rm -rf "${bridge_tmp}"' EXIT
+./just.d/scripts/build-python-bridge.sh --output-dir "${bridge_tmp}" >/dev/null
+bridge_version="$("${bridge_tmp}/ragmail-py" --version | awk '{print $NF}')"
+if [[ "${bridge_version}" != "${version}" ]]; then
+  echo "Release check failed: bridge version '${bridge_version}' does not match VERSION '${version}'." >&2
   exit 1
 fi
 

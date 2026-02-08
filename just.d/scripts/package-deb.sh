@@ -3,15 +3,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: package-deb.sh --version X.Y.Z --arch amd64|arm64 --binary /path/to/ragmail-rs --output /path/to/pkg.deb [--package-name ragmail-rs]
+usage: package-deb.sh --version X.Y.Z --arch amd64|arm64 --binary /path/to/ragmail --bridge-binary /path/to/ragmail-py --output /path/to/pkg.deb [--package-name ragmail]
 EOF
 }
 
 version=""
 arch=""
 binary=""
+bridge_binary=""
 output=""
-package_name="ragmail-rs"
+package_name="ragmail"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +32,10 @@ while [[ $# -gt 0 ]]; do
       output="${2:-}"
       shift 2
       ;;
+    --bridge-binary)
+      bridge_binary="${2:-}"
+      shift 2
+      ;;
     --package-name)
       package_name="${2:-}"
       shift 2
@@ -47,7 +52,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${version}" || -z "${arch}" || -z "${binary}" || -z "${output}" ]]; then
+if [[ -z "${version}" || -z "${arch}" || -z "${binary}" || -z "${bridge_binary}" || -z "${output}" ]]; then
   usage >&2
   exit 2
 fi
@@ -66,6 +71,10 @@ if [[ ! -x "${binary}" ]]; then
   echo "binary is not executable: ${binary}" >&2
   exit 1
 fi
+if [[ ! -x "${bridge_binary}" ]]; then
+  echo "bridge binary is not executable: ${bridge_binary}" >&2
+  exit 1
+fi
 
 if ! command -v dpkg-deb >/dev/null 2>&1; then
   echo "dpkg-deb is required to build .deb packages" >&2
@@ -77,8 +86,9 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 
 pkg_root="${tmp_dir}/pkg"
 mkdir -p "${pkg_root}/DEBIAN" "${pkg_root}/usr/bin"
-cp "${binary}" "${pkg_root}/usr/bin/ragmail-rs"
-chmod 0755 "${pkg_root}/usr/bin/ragmail-rs"
+cp "${binary}" "${pkg_root}/usr/bin/ragmail"
+cp "${bridge_binary}" "${pkg_root}/usr/bin/ragmail-py"
+chmod 0755 "${pkg_root}/usr/bin/ragmail" "${pkg_root}/usr/bin/ragmail-py"
 
 cat > "${pkg_root}/DEBIAN/control" <<EOF
 Package: ${package_name}

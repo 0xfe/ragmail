@@ -6,6 +6,20 @@ repo_root="$(cd "${script_dir}/../.." && pwd)"
 venv_dir="${repo_root}/.venv"
 cache_dir="${repo_root}/.uv-cache"
 
+ensure_ragmail_py_wrapper() {
+  if [[ -x "${venv_dir}/bin/ragmail-py" ]]; then
+    return 0
+  fi
+
+  cat > "${venv_dir}/bin/ragmail-py" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PYTHONPATH="${repo_root}/python/lib\${PYTHONPATH:+:\${PYTHONPATH}}"
+exec "${venv_dir}/bin/python" -m ragmail.cli "\$@"
+EOF
+  chmod 0755 "${venv_dir}/bin/ragmail-py"
+}
+
 bootstrap_with_uv() {
   if ! command -v uv >/dev/null 2>&1; then
     return 1
@@ -31,21 +45,23 @@ bootstrap_with_pip() {
 
 if ! bootstrap_with_uv; then
   echo "uv bootstrap failed; falling back to python -m venv + pip" >&2
-  if [[ -x "${repo_root}/python/.venv/bin/ragmail" ]]; then
+  if [[ -x "${repo_root}/python/.venv/bin/python" ]]; then
     echo "Reusing existing python/.venv as shared .venv"
     rm -rf "${venv_dir}"
     ln -s "${repo_root}/python/.venv" "${venv_dir}"
   else
-  rm -rf "${venv_dir}"
+    rm -rf "${venv_dir}"
     bootstrap_with_pip
   fi
 fi
 
-if [[ ! -x "${venv_dir}/bin/ragmail" ]]; then
-  echo "error: ragmail CLI not found at ${venv_dir}/bin/ragmail after bootstrap" >&2
+ensure_ragmail_py_wrapper
+
+if [[ ! -x "${venv_dir}/bin/ragmail-py" ]]; then
+  echo "error: ragmail-py CLI not found at ${venv_dir}/bin/ragmail-py after bootstrap" >&2
   exit 1
 fi
 
-"${venv_dir}/bin/ragmail" --version >/dev/null
+"${venv_dir}/bin/ragmail-py" --version >/dev/null
 
 echo "Python bootstrap complete: ${venv_dir}"

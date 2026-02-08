@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::DateTime;
 use ragmail_index::record_from_message;
@@ -159,6 +160,25 @@ pub fn clean_mbox_file(
     output_spam: &Path,
     options: &CleanOptions,
 ) -> Result<CleanStats, CleanError> {
+    clean_mbox_file_with_progress(
+        input_path,
+        output_clean,
+        output_spam,
+        options,
+        Duration::from_millis(250),
+        None,
+    )
+}
+
+/// Cleans an mbox file into clean + spam JSONL outputs and emits periodic progress callbacks.
+pub fn clean_mbox_file_with_progress(
+    input_path: &Path,
+    output_clean: &Path,
+    output_spam: &Path,
+    options: &CleanOptions,
+    progress_every: Duration,
+    mut progress_callback: Option<&mut dyn FnMut(&CleanStats)>,
+) -> Result<CleanStats, CleanError> {
     if let Some(parent) = output_clean.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -201,6 +221,7 @@ pub fn clean_mbox_file(
         .unwrap_or_else(|| file_name_or_path(input_path));
     let mut stream = MboxMessageStream::from_path(input_path, options.start_offset)?;
     let mut stats = CleanStats::default();
+    let mut last_progress = std::time::Instant::now();
 
     loop {
         let Some(message) = stream.next_message()? else {
@@ -234,6 +255,12 @@ pub fn clean_mbox_file(
                 stats.errors += 1;
             }
         }
+        emit_clean_progress(
+            &mut progress_callback,
+            &mut last_progress,
+            progress_every,
+            &stats,
+        );
     }
 
     clean_writer.flush()?;
@@ -246,7 +273,27 @@ pub fn clean_mbox_file(
         .clone()
         .unwrap_or_else(|| default_summary_output(input_path));
     write_summary_file(&summary_path, input_path, output_clean, output_spam, &stats)?;
+    if let Some(callback) = progress_callback.as_mut() {
+        callback(&stats);
+    }
     Ok(stats)
+}
+
+fn emit_clean_progress(
+    progress_callback: &mut Option<&mut dyn FnMut(&CleanStats)>,
+    last_progress: &mut std::time::Instant,
+    progress_every: Duration,
+    stats: &CleanStats,
+) {
+    if let Some(callback) = progress_callback.as_mut() {
+        let due = stats.processed == 1
+            || progress_every.is_zero()
+            || last_progress.elapsed() >= progress_every;
+        if due {
+            callback(stats);
+            *last_progress = std::time::Instant::now();
+        }
+    }
 }
 
 fn clean_message(
