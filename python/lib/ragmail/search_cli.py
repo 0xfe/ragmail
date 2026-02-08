@@ -22,27 +22,19 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 @click.group()
 @click.version_option(version=__version__)
 def cli():
-    """Email Search - Ingest cleaned JSONL and search with natural language."""
+    """Email Search - Ingest cleaned JSONL and query with natural language."""
     pass
 
 
 
-@cli.command()
-@click.argument("query")
-@click.option(
-    "--db", type=click.Path(exists=True, path_type=Path), help="Database path"
-)
-@click.option("--limit", type=int, default=10, help="Number of results")
-@click.option("--rag", is_flag=True, help="Generate RAG response")
-@click.option("--plan/--no-plan", default=None, help="Use LLM query planner")
-def search(
+def _run_query_command(
     query: str,
     db: Optional[Path],
     limit: int,
     rag: bool,
     plan: Optional[bool],
-):
-    """Search emails with natural language query."""
+) -> None:
+    """Execute a natural-language email query."""
     settings = get_settings()
     db_path = db or settings.db_path
 
@@ -64,11 +56,23 @@ def search(
         # Create LLM backend if RAG or planner is requested
         llm_backend = None
         if rag or use_llm_planner:
-            llm_backend = create_llm_backend(
-                model=settings.openai_model,
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-            )
+            try:
+                llm_backend = create_llm_backend(
+                    model=settings.openai_model,
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                )
+            except Exception as exc:
+                if rag:
+                    console.print(
+                        "[red]Error:[/red] Could not initialize LLM backend. "
+                        "Set OpenAI-compatible env vars or rerun with [bold]--no-rag[/bold]."
+                    )
+                else:
+                    console.print(
+                        "[red]Error:[/red] Could not initialize LLM backend for query planner."
+                    )
+                raise SystemExit(1) from exc
 
         engine = SearchEngine(
             repository,
@@ -109,7 +113,7 @@ def search(
         console.print("[yellow]No results found.[/yellow]")
         return
 
-    table = Table(title=f"Search Results for: {query}")
+    table = Table(title=f"Query Results for: {query}")
     table.add_column("Date", style="dim", width=10)
     table.add_column("From", width=25)
     table.add_column("Subject", width=40)
@@ -132,6 +136,52 @@ def search(
     if response.rag_answer:
         console.print("\n[bold green]Answer:[/bold green]")
         console.print(response.rag_answer)
+
+
+@cli.command("query")
+@click.argument("query")
+@click.option(
+    "--db", type=click.Path(exists=True, path_type=Path), help="Database path"
+)
+@click.option("--limit", type=int, default=10, help="Number of results")
+@click.option(
+    "--rag/--no-rag",
+    default=True,
+    help="Enable/disable RAG answer generation (default: enabled)",
+)
+@click.option("--plan/--no-plan", default=None, help="Use LLM query planner")
+def query_command(
+    query: str,
+    db: Optional[Path],
+    limit: int,
+    rag: bool,
+    plan: Optional[bool],
+):
+    """Query emails with natural language."""
+    _run_query_command(query=query, db=db, limit=limit, rag=rag, plan=plan)
+
+
+@cli.command("search", hidden=True)
+@click.argument("query")
+@click.option(
+    "--db", type=click.Path(exists=True, path_type=Path), help="Database path"
+)
+@click.option("--limit", type=int, default=10, help="Number of results")
+@click.option(
+    "--rag/--no-rag",
+    default=True,
+    help="Enable/disable RAG answer generation (default: enabled)",
+)
+@click.option("--plan/--no-plan", default=None, help="Use LLM query planner")
+def search_compat_command(
+    query: str,
+    db: Optional[Path],
+    limit: int,
+    rag: bool,
+    plan: Optional[bool],
+):
+    """Backward-compatible alias for `query`."""
+    _run_query_command(query=query, db=db, limit=limit, rag=rag, plan=plan)
 
 
 @cli.command()

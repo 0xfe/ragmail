@@ -6,6 +6,9 @@ It also shows when to run stages independently.
 The main entrypoint is:
 - `ragmail pipeline ... --workspace <name>`
 
+Related post-ingest commands (`query`, `stats`, `message`, `serve`) are Python passthrough commands.
+They work from `ragmail`, even though they are not listed in `ragmail --help`.
+
 Default stage order:
 1. `model`
 2. `split`
@@ -133,7 +136,10 @@ ragmail pipeline --workspace my-mail --stages ingest --refresh
 - `--resume/--no-resume`: continue from checkpoints or force fresh execution behavior.
 - `--refresh`: archive stage outputs and rerun selected stages.
 - `--base-dir`: change workspace root.
-- `--cache-dir`: set shared model/cache directory.
+- `--years`: filter split/preprocess inputs to specific years.
+- `--clean-dir`: use external clean JSONL for vectorize/ingest.
+- `--embeddings-dir`: override embeddings input/output directory.
+- `--db-path`: override target LanceDB path for ingest.
 
 Ingest and embedding tuning:
 - `--embedding-batch-size`
@@ -163,7 +169,7 @@ Refresh behavior:
 ragmail stats --workspace my-mail
 
 # Search after ingest
-ragmail search "invoice" --workspace my-mail --limit 20
+ragmail query --workspace my-mail "invoice" --limit 20
 
 # Fetch full raw message via index
 ragmail message --workspace my-mail --email-id <email_id>

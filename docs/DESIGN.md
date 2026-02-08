@@ -86,7 +86,9 @@ Rust to Python boundary:
   - `ragmail py model`
   - `ragmail py vectorize`
   - `ragmail py ingest`
-- Rust forwards non-Rust subcommands (`search`, `stats`, `serve`, etc.) to `ragmail-py`.
+- Rust accepts external subcommands and forwards them to Python for query/API workflows.
+  - Preferred path: `ragmail-py ...` when available.
+  - Fallback path: `python -m ragmail.search_cli ...` in source/dev environments.
 
 This boundary keeps heavy MBOX processing in Rust while preserving Python ML integrations.
 

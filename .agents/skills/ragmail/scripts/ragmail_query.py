@@ -312,16 +312,18 @@ def main() -> int:
         sub.add_argument("--labels-like", dest="labels_like", help="Match labels")
         sub.add_argument("--format", choices=["text", "json"], default="text")
 
-    search = subparsers.add_parser("search", help="FTS search with filters")
-    add_common(search)
-    search.add_argument("--query", help="FTS query string")
-    search.add_argument("--limit", type=int, default=50)
-    search.add_argument(
+    query = subparsers.add_parser(
+        "query", aliases=["search"], help="FTS query with filters"
+    )
+    add_common(query)
+    query.add_argument("--query", help="FTS query string")
+    query.add_argument("--limit", type=int, default=50)
+    query.add_argument(
         "--fields",
         default="date,from_address,from_name,subject,email_id,snippet",
         help="Comma-separated output fields (use 'snippet')",
     )
-    search.add_argument("--snip-len", type=int, default=200)
+    query.add_argument("--snip-len", type=int, default=200)
 
     count = subparsers.add_parser("count", help="Count emails matching filters")
     add_common(count)
@@ -338,7 +340,7 @@ def main() -> int:
     table = _connect_table(args)
     filters = _build_filters(args)
 
-    if args.command == "search":
+    if args.command in {"query", "search"}:
         rows = _search_rows(table, args.query, filters, args.limit, args.table)
         _print_rows(rows, args)
         return 0

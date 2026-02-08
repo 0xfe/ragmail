@@ -65,11 +65,17 @@ No `just` fallback:
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Sync deps from python/
+# Preferred: sync deps from python/ via uv
 UV_PROJECT_ENVIRONMENT=.venv uv sync --project python --extra dev
 
 # Fetch Rust crates
 cargo fetch --manifest-path rust/Cargo.toml
+```
+
+If `uv` is unavailable:
+```bash
+python -m pip install --upgrade pip
+python -m pip install -e python[dev]
 ```
 
 ## Daily Iteration Loop
@@ -143,6 +149,11 @@ DB ingest and search:
 - `python/lib/ragmail/search/`
 
 ## Debugging Workflows
+
+Note on command discovery:
+- `ragmail --help` shows Rust-native commands only.
+- Python passthrough commands (`query`, `stats`, `serve`, `message`, `workspace`) still work.
+- For full passthrough command list: `ragmail-py --help`.
 
 ## Inspect workspace state
 ```bash

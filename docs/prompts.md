@@ -616,5 +616,5 @@ class RAGPrompt:
 ## Related Documentation
 
 - [Architecture Overview](DESIGN.md): How prompts fit into the RAG pipeline
-- [Examples](EXAMPLES.md): Real-world query examples and responses
+- [Examples](examples.md): Real-world query examples and responses
 - [API Documentation]: OpenAPI docs for programmatic access

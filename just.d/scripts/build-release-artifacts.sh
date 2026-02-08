@@ -241,7 +241,7 @@ if [[ "${RAGMAIL_RELEASE_RUNTIME_SMOKE:-1}" == "1" ]]; then
   if ! "${bundle_dir}/ragmail" version >/dev/null 2>&1; then
     echo "warning: runtime smoke failed to execute bundled ragmail (continuing)." >&2
   fi
-  if ! "${bundle_dir}/ragmail" search --help >/dev/null 2>&1; then
+  if ! "${bundle_dir}/ragmail" query --help >/dev/null 2>&1; then
     echo "warning: runtime smoke failed to execute bundled ragmail passthrough (continuing)." >&2
     echo "         set RAGMAIL_RELEASE_RUNTIME_SMOKE=0 to skip runtime smoke probes." >&2
   fi

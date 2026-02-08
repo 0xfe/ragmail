@@ -62,15 +62,40 @@ def cli() -> None:
     """ragmail - unified CLI for email cleaning, ingestion, and search."""
 
 
-def _passthrough_command(help_text: str):
+def _passthrough_command(help_text: str, *, hidden: bool = False):
     return click.command(
         context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
         add_help_option=False,
         help=help_text,
+        hidden=hidden,
     )
 
 
-@_passthrough_command("Search the database (pass-through to email-search search).")
+@_passthrough_command("Query the database (pass-through to email-search query).")
+@click.option("--workspace", "workspace_name", help="Workspace name for cache/config")
+@click.option("--base-dir", type=click.Path(path_type=Path), help="Workspace base directory")
+@click.option("--cache-dir", type=click.Path(path_type=Path), help="Shared cache directory")
+@click.pass_context
+def query(
+    ctx: click.Context,
+    workspace_name: str | None,
+    base_dir: Path | None,
+    cache_dir: Path | None,
+) -> None:
+    _apply_workspace_env(
+        workspace_name,
+        base_dir,
+        cache_dir=cache_dir,
+        args=list(ctx.args),
+        set_db_env=True,
+    )
+    _run_module("ragmail.search_cli", ["query", *ctx.args])
+
+
+@_passthrough_command(
+    "Backward-compatible alias for `query` (pass-through to email-search query).",
+    hidden=True,
+)
 @click.option("--workspace", "workspace_name", help="Workspace name for cache/config")
 @click.option("--base-dir", type=click.Path(path_type=Path), help="Workspace base directory")
 @click.option("--cache-dir", type=click.Path(path_type=Path), help="Shared cache directory")
@@ -88,7 +113,7 @@ def search(
         args=list(ctx.args),
         set_db_env=True,
     )
-    _run_module("ragmail.search_cli", ["search", *ctx.args])
+    _run_module("ragmail.search_cli", ["query", *ctx.args])
 
 
 @_passthrough_command("Show database stats (pass-through to email-search stats).")
@@ -154,6 +179,7 @@ def serve(
     _run_module("ragmail.search_cli", ["serve", *ctx.args])
 
 
+cli.add_command(query)
 cli.add_command(search)
 cli.add_command(stats)
 cli.add_command(dedupe)

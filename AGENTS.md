@@ -12,7 +12,7 @@ ragmail/
 │   ├── tests/            # Python test suite
 │   ├── pyproject.toml
 │   └── uv.lock
-├── rust/                 # Rust workspace (CLI + split/preprocess/core crates)
+├── rust/                 # Rust workspace (ragmail-cli/clean/core/index/mbox crates)
 ├── just.d/               # Build/test/release helper scripts
 ├── docs/                 # Documentation
 ├── private/              # Private email data (gitignored)
@@ -45,6 +45,24 @@ When using Codex or Claude to dig through email:
 - Always translate relative dates ("last summer") into explicit ranges.
 - Prefer `emails` for high-level questions; use `email_chunks` for deeper body matches.
 - Provide the workspace name (e.g., `2026`) or the full db path.
+
+Skill environment setup (either path works):
+```bash
+# Option A: uv-managed venv (recommended)
+uv venv
+source .venv/bin/activate
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --project python
+
+# Option B: stdlib venv module
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e python
+```
+
+If `.venv` already exists, reuse it and run skill scripts with either:
+- `UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python ...`
+- `./.venv/bin/python ...`
 
 More info: https://developers.openai.com/codex/skills/
 
@@ -121,6 +139,7 @@ Attachments are not useful for RAG but metadata is:
 - Remove binary content
 - Preserve metadata: filename, type, size
 - Preserve metadata in JSON `attachments` array
+- For explicit extraction requests, use index-backed lookup (`split/mbox_index.jsonl` with `mbox_file` + byte `offset` + `length`) for fast targeted reads.
 
 ### 8. Spam/Newsletter Detection
 
@@ -150,7 +169,7 @@ UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python -m ragmail.samp
 ragmail pipeline test-sample.mbox --workspace test-sample
 
 # Search within workspace
-ragmail search "meeting tomorrow" --workspace test-sample
+ragmail query "meeting tomorrow" --workspace test-sample
 ```
 
 Rust quality gates:
@@ -163,12 +182,15 @@ cargo test --manifest-path rust/Cargo.toml --workspace
 Tip:
 - Use `ragmail pipeline --refresh` to rerun selected stages from scratch (archives outputs and clears checkpoints).
 
-## Output Files
+## Workspace Outputs
 
-For input `gmail-2015.mbox`:
-- `gmail-2015.clean.jsonl` - Cleaned emails ready for RAG
-- `gmail-2015.spam.jsonl` - Filtered spam/newsletters (for review)
-- `gmail-2015.mbox.summary` - Processing statistics and metadata
+For workspace `workspaces/<name>/`:
+- `clean/*.clean.jsonl` - Cleaned emails ready for RAG
+- `spam/*.spam.jsonl` - Filtered spam/newsletters (for review)
+- `split/YYYY-MM.mbox` - Monthly split MBOX files
+- `split/mbox_index.jsonl` - Byte-offset index for fast raw message and attachment lookup
+- `reports/*.summary` - Processing statistics and metadata
+- `db/email_search.lancedb` - Search database
 
 ## Shared Library Usage
 

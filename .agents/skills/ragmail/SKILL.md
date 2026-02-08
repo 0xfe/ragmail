@@ -12,18 +12,32 @@ Use this skill when the user asks questions about email content in ragmail works
 ## Quick start
 
 1. Identify the target workspace (e.g., `2026`) or the full LanceDB path.
-2. Ensure Python is run from the repo venv created with `uv`.
+2. Ensure Python runs from the repo `.venv` (created with either `uv` or `python -m venv`).
 3. Prefer a short ad‑hoc Python script that connects to LanceDB and runs the query.
 4. If the question uses relative dates ("last summer", "yesterday"), convert to absolute dates before querying.
 
 ### Python environment (required)
 
-Use `uv` to create and manage the repo venv:
+If `.venv` already exists, reuse it:
 
 ```bash
+source .venv/bin/activate
+./.venv/bin/python -c "import lancedb; print('ok')"
+```
+
+If `.venv` is missing, set it up with either:
+
+```bash
+# Option A: uv-managed venv (recommended)
 uv venv
 source .venv/bin/activate
 UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --project python
+
+# Option B: stdlib venv module
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e python
 ```
 
 ## Locate the database
@@ -136,7 +150,7 @@ PY
 Use this when you need fast counts, snippets, or amount extraction without writing a Python snippet.
 
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_query.py search --workspace 2026 --query "Arkin teacher"
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_query.py query --workspace 2026 --query "Arkin teacher"
 ```
 
 ## Commands
@@ -144,13 +158,13 @@ python .agents/skills/ragmail/scripts/ragmail_query.py search --workspace 2026 -
 Run from repo root:
 
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_query.py search --workspace 2026 --query "Arkin teacher" --limit 50
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_query.py query --workspace 2026 --query "Arkin teacher" --limit 50
 ```
 
-### Search
+### Query
 
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_query.py search \
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_query.py query \
   --workspace 2026 \
   --query "Arkin teacher" \
   --limit 50 \
@@ -160,7 +174,7 @@ python .agents/skills/ragmail/scripts/ragmail_query.py search \
 ### Count
 
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_query.py count \
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_query.py count \
   --workspace 2026 \
   --from-like "bob" \
   --year 2026 \
@@ -170,7 +184,7 @@ python .agents/skills/ragmail/scripts/ragmail_query.py count \
 ### Sum amounts (costs)
 
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_query.py sum \
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_query.py sum \
   --workspace 2026 \
   --query "house painting" \
   --start 2025-06-01 \
@@ -187,7 +201,7 @@ python .agents/skills/ragmail/scripts/ragmail_query.py sum \
 
 ## Output notes
 
-- `search` emits key fields and a snippet.
+- `query` emits key fields and a snippet.
 - `count` returns `count=` and warns if it hits `--max-scan`.
 - `sum` extracts currency-like amounts from matching emails and reports totals plus examples.
 
@@ -197,7 +211,7 @@ Use a two-step flow: locate the matching chunk to get `email_id`, then fetch the
 
 1. Find the matching chunk and capture `email_id`:
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_query.py search \
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_query.py query \
   --workspace 2026 \
   --table email_chunks \
   --query "Born 24 March 2010" \
@@ -227,7 +241,7 @@ PY
 
 Alternate: Use `ragmail_query.py` with `--email-id` to fetch the full body directly.
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_query.py search \
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_query.py query \
   --workspace 2026 \
   --email-id bf509cfe2e3ca574 \
   --limit 1 \
@@ -253,14 +267,14 @@ If search results are thin or you need more body context:
 - Increase `--limit` or `--max-scan`.
 - Use narrower date ranges.
 
-## Attachments (opt-in only, slow)
+## Attachments (opt-in, index-backed and usually fast)
 
-Only fetch or scan attachments if the user explicitly asks. This is rare and expensive because it requires reading large raw MBOX files. You can suggest looking there when it’s likely helpful, but always warn that it will be slow and requires explicit confirmation.
+Only fetch attachments if the user explicitly asks. Attachment extraction now uses `split/mbox_index.jsonl` (`mbox_file` + `offset` + `length`) to seek directly to one message, so it is usually fast and does not require full MBOX scans.
 
 Preferred flow:
 1. Check metadata in LanceDB (`has_attachment`, `attachment_names`, `attachment_types`) to see if attachments exist.
-2. If the user explicitly asks, use the attachment extractor to pull the attachment from the split MBOX.
-3. Use the MBOX index file to avoid full scans. The pipeline creates it during the `preprocess` stage.
+2. If the user explicitly asks, use the attachment extractor to pull from the indexed message bytes.
+3. Ensure `workspaces/<name>/split/mbox_index.jsonl` exists (created by `preprocess`).
 
 ### Fast metadata check (no MBOX scan)
 ```bash
@@ -283,7 +297,7 @@ PY
 
 ### Extract an attachment by Message-ID (optimized)
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_attachments.py \
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_attachments.py \
   --workspace 2026 \
   --message-id "<abc123@example.com>" \
   --out-dir /tmp/attachments
@@ -291,7 +305,7 @@ python .agents/skills/ragmail/scripts/ragmail_attachments.py \
 
 ### Extract by `email_id`
 ```bash
-python .agents/skills/ragmail/scripts/ragmail_attachments.py \
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --project python python .agents/skills/ragmail/scripts/ragmail_attachments.py \
   --workspace 2026 \
   --email-id bf509cfe2e3ca574 \
   --out-dir /tmp/attachments

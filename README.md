@@ -1,30 +1,34 @@
 # RAGmail
 
-## About
+RAGmail lets you search and analyze your email with your favourite agent (OpenCode, Claude, Codex, etc.)
 
-RAGmail lets you search and analyze your email with your favourite agent (Claude, Codex, etc.)
+It consists of a comprehensive ingestion pipeline to build a semantically-indexed local database of your email, along with an agent skill (`ragmail`) that you can use to ask questions.
 
 Typical questions you can answer:
 
 - "_What did we decide about the school trip budget?_"
+- "_Tell me how my communication style has changed over time, with examples._"
 - "_Where all did I travel to in 2006?_"
+- "_Explore my relationship with Alice and write me a doc on how it progressed, start to finish._"
 - "_How many times did Bob email me in February 2026?_"
 
-I have about 22 years of e-mail in Gmail, and another 10 years of it my archives. I built this tool
-so I could do some local analysis on my email.
+As you use this more and more, you'll find that you can uncover some really interesting insights from your email.
+
+I have about 22 years of e-mail in Gmail, and another 10 years of it my archives. I built this tool so I could do some local analysis on my email.
+
+### Privacy Note
+
+You have complete control over your data. During the pipline stage, no data leaves your machine by default. All vector embeddings are calculated and stored locally.
+
+When using the agent (or with `ragmail query`), what you share depends entirely on the tools and modles you use. For example, if you use OpenAI's Codex, you're sharing your queries and all relevant context with OpenAI. If you use OpenCode with a local LLM, you're not sharing anything.
 
 ## How it works
 
-RAGmail performs all the heavy lifting around processing gigantic mail boxes, cleaning it up, and building a database indexed for both full-text and semantic search.
+After downloading your mail, you call `ragmail pipeline` to start the email ingestion pipeline.
 
-After downloading your mail (say, from Google Takeout), you can run `ragmail pipeline` to process it. Processing is broken down into stages, and can be resumed if it is interrupted.
+This pipeline tirelessly processes your gigantic mailboxes, cleaning them up, and building a local database indexed for both full-text and semantic search. This database can now be queried and analyzed by your favourite agent.
 
-The stages are:
-
-1. `split`: Split the mbox file into smaller mbox files, one for each month.
-2. `preprocess`: Clean and normalize the mbox files, e.g., remove bulk mail, attachments, signatures, etc.
-3. `vectorize`: Generate embedding vectors for the subject and body of each message.
-4. `ingest`: Ingest the embeddings, text, and metadata into a vector database.
+For more details, see the [pipeline](docs/pipeline.md) document or the [design doc](docs/DESIGN.md).
 
 ## Quickstart
 
@@ -64,10 +68,9 @@ This is the simplest way to get started, but it will be slow if you have a large
 ```bash
 # Run full pipeline (model,split,preprocess,vectorize,ingest)
 ragmail pipeline ~/private/all-emails.mbox --workspace my-mail
-
-# Search your workspace
-ragmail search "meeting tomorrow" --workspace my-mail
 ```
+
+When this is complete, you can use your favorite agent to ask questions about your email.
 
 ### Run the pipeline on a remote GPU
 
@@ -114,6 +117,16 @@ Claude is ready. Type your questions below.
 ... skill ragmail is now available
 > ragmail "tell me about the school trip budget for 2026"
 ... <results>
+
+
+$ codex
+
+Codex is ready. Type your questions below.
+
+> $ragmail use the workspace my-mail
+... skill ragmail is now available, looking for workspace
+> ragmail "tell me about the school trip budget for 2026"
+... <results>
 ```
 
 ## Prerequisites
@@ -130,7 +143,8 @@ Optional for release maintainers:
 
 ## Usage Instructions
 
-Run `ragmail --help` for the full command list.
+Run `ragmail --help` for Rust-native commands.
+Use `ragmail-py --help` to see the full passthrough command list (`query`, `stats`, `serve`, etc.).
 
 Common commands:
 ```bash
@@ -148,11 +162,14 @@ ragmail pipeline private/gmail-2015.mbox --workspace my-mail --resume
 # Re-run selected stages from scratch (archives old outputs)
 ragmail pipeline private/gmail-2015.mbox --workspace my-mail --stages preprocess --refresh
 
-# Search
-ragmail search "invoice" --workspace my-mail
+# Query
+ragmail query "invoice" --workspace my-mail
 
-# Search with RAG answer generation
-ragmail search "what did we decide about the budget" --workspace my-mail --rag
+# Query with default RAG answer generation
+ragmail query "what did we decide about the budget" --workspace my-mail
+
+# Retrieval-only query (disable RAG/planner)
+ragmail query "what did we decide about the budget" --workspace my-mail --no-rag
 
 # Show full raw message bytes by id
 ragmail message --workspace my-mail --email-id <email_id>
@@ -203,13 +220,13 @@ By default, all pipeline stages run on your machine.
 - `model`, `split`, `preprocess`: local processing (`split`/`preprocess` are Rust-backed).
 - `vectorize`: local embedding inference.
 - `ingest`: local LanceDB writes.
-- `search`: local retrieval.
+- `query`: local retrieval (RAG-enabled by default unless `--no-rag`).
 
 No email data must leave your machine for these steps.
 
 ### What can call external models
 
-LLM-assisted features (for example `ragmail search --rag`) can call an OpenAI-compatible API.
+LLM-assisted features (for example `ragmail query`) can call an OpenAI-compatible API.
 
 You control this with environment variables:
 
@@ -240,3 +257,25 @@ You can keep everything local with a combination of OpenCode and vLLM/Ollama run
 - Release process: [`docs/release.md`](docs/release.md)
 - Usage examples: [`docs/examples.md`](docs/examples.md)
 - Prompt details: [`docs/prompts.md`](docs/prompts.md)
+
+## MIT License
+
+Copyright (c) 2026 Mohit Cheppudira <shhh@mo.town>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

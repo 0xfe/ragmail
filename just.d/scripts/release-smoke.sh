@@ -56,7 +56,7 @@ if ! "${extract_dir}/ragmail" version >/dev/null 2>&1; then
   echo "release smoke failed: extracted ragmail binary did not run" >&2
   exit 1
 fi
-if ! "${extract_dir}/ragmail" search --help >/dev/null 2>&1; then
+if ! "${extract_dir}/ragmail" query --help >/dev/null 2>&1; then
   echo "release smoke failed: extracted ragmail could not reach bundled ragmail-py" >&2
   exit 1
 fi

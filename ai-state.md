@@ -17,7 +17,7 @@ Snapshot (2026-02-08)
   - `model` warmup
   - `vectorize`
   - `ingest`
-  - search/API/LLM commands (forwarded from Rust passthrough)
+  - query/API/LLM commands (forwarded from Rust passthrough)
 
 ## Stage contract
 - Canonical stage order: `model,split,preprocess,vectorize,ingest`
@@ -41,7 +41,11 @@ Snapshot (2026-02-08)
   - sibling `ragmail-py` next to `ragmail`
   - repo `.venv/bin/ragmail-py` / `python/.venv/bin/ragmail-py`
   - fallback `python -m ragmail.cli`
-- Rust forwards unknown subcommands to Python bridge (`search`, `stats`, `dedupe`, `serve`, etc.).
+- Rust forwards unknown subcommands to Python bridge (`query`, `stats`, `dedupe`, `serve`, etc.).
+- Query command contract:
+  - primary command is `ragmail query`
+  - legacy `ragmail search` alias remains hidden for compatibility
+  - RAG is enabled by default (`--rag` / `--no-rag`)
 - Python bridge streaming protocol (for Rust UI):
   - progress lines: JSON with `event="progress"` and stage-specific counters.
   - ingest compaction lines: JSON with `event="compaction"`.
@@ -82,7 +86,7 @@ Snapshot (2026-02-08)
 - Tarballs include both binaries:
   - `ragmail`
   - `ragmail-py`
-- Artifact build script runs a best-effort local runtime smoke probe (`ragmail version` + `ragmail search --help`) before packaging.
+- Artifact build script runs a best-effort local runtime smoke probe (`ragmail version` + `ragmail query --help`) before packaging.
 - Cross-platform local requests are rejected (PyInstaller bridge must be built on target OS/arch); use matching host or CI matrix.
 - Linux package name/file pattern: `ragmail_<version>_<arch>.deb`
 - Homebrew formula filename/class:
