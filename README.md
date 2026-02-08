@@ -2,6 +2,9 @@
 
 ## About
 
+I have about 22 years of e-mail in Gmail, and another 10 years of it my archives. I built this tool
+so I could do some local analysis on my email.
+
 RAGmail lets you search and analyze your email with your favourite agent (Claude, Codex, etc.)
 
 Typical questions you can answer:
@@ -10,33 +13,58 @@ Typical questions you can answer:
 - "Where all did I travel to in in 2006?"
 - "How many times did Bob email me in February 2026?"
 
+## How it works
+
+`RAGmail` performs all the heavy lifting around processing gigantic mail boxes, cleaning it up, and building
+a database indexed for both full-text and semantic search.
+
+Cleaning involves things like removing bulk mail, stripping headers, signatures, attachments, and other unnecessary
+elements, normailizing and tagging common fields, and a host of other things.
+
+After messages are cleaned, `RAGmail` generates embedding vectors for the subject and body of each message, and
+then ingests everything into a vector database, with pointers to the original email for further analysis.
+
+
+
+
 ## Quickstart
+
+### Download and Build `RAGmail`
+
 ```bash
-# 1) Clone
-git clone <your-repo-url>
+# Clone this repo
+git clone <this repo>
 cd ragmail
 
-# 2) Bootstrap Python + Rust deps
+# Build python and rust code
 just bootstrap
 
-# 3) Activate the venv
+# Activate the venv
 source .venv/bin/activate
+```
 
-# 4) Run full pipeline (model,split,preprocess,vectorize,ingest)
+### Fetch your mailbox
+
+`RAGmail` works with standard `.MBOX` files. You can download your entire Gmail mailbox
+with Google Takeout.
+
+
+### Ingest into `RAGmail`
+
+```bash
+# Run full pipeline (model,split,preprocess,vectorize,ingest)
 ragmail pipeline private/gmail-2015.mbox --workspace my-mail
 
-# 5) Search your workspace
+# Search your workspace
 ragmail search "meeting tomorrow" --workspace my-mail
 ```
 
-`just bootstrap` now does both:
-- prepares a shared root `.venv` that includes the `ragmail` CLI
-- builds the Rust workspace (so Rust stages are ready before first pipeline run)
-## Quickstart (w/ Remote GPU)
+### Quickstart (with a remote GPU)
 
-Use this when embedding/vectorization is slow on your local machine. It performs most of the work
-on the local machine, but lets you offload the GPU-heavy work to a remote machine.
-
+This is much much faster (10-100x) if you don't have a local GPU. Embedding calculations are
+very compute-intensive, and if you have very large mailboxes it could take multiple days! A
+single L4 GPU node on GCP can process a 15GB mailbox in less than an hour (for less than the
+price of coffee.)
 
 ```bash
 # Local: run preprocessing only
@@ -66,6 +94,10 @@ rsync -av user@host:/data/ragmail/my-mail-embeddings.tar.gz ./
 tar -xzf my-mail-embeddings.tar.gz -C workspaces/my-mail
 ragmail pipeline --workspace my-mail --stages ingest
 ```
+
+## Analyzing your email
+k
+
 
 ## Prerequisites
 Required:
