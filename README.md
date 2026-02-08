@@ -55,9 +55,9 @@ just bootstrap
 source .venv/bin/activate
 ```
 
-### Run the pipeline on your local machine
+### Option 1: Run pipeline locally
 
-This is the simplest way to get started, but it will be slow if you have a large mailbox.
+This is the simplest way to get started, but it will be slow without a large GPU. For a 15GB mailbox (about 200k messages) it will take **about 25 hours** on a Macbook Air M3.
 
 ```bash
 # Run full pipeline (split,preprocess,vectorize,ingest)
@@ -66,11 +66,9 @@ ragmail pipeline ~/private/all-emails.mbox --workspace my-mail
 
 When this is complete, you can use your favorite agent to ask questions about your email.
 
-### Run the pipeline on a remote GPU
+### Option 2: Run pipeline locally, offload embedding to remote GPU
 
-This approach is much faster (10 - 100x) if you have a large mailbox. Here you run the compute-intensive parts of the pipeline on a remote GPU.
-
-For example, you can quickly spin up an L4 instance on GCP for this purpose, which for a 15GB mailbox (about 200k messages) would take less than 30 minutes and cost about $0.50 USD.
+This approach is much faster (10 - 100x) if you have a large mailbox. For example, if you spin up an L4 instance on GCP for a 15GB mailbox (about 200k messages) it will take **about an hour and cost less than a dollar**.
 
 ```bash
 # Local: run the initial stages only
@@ -80,17 +78,17 @@ ragmail pipeline ~/private/all-emails.mbox --workspace my-mail --stages split,pr
 tar -czvf my-mail-clean.tar.gz workspaces/my-mail/clean
 scp my-mail-clean.tar.gz user@host:/tmp
 
-# On the remote host, make sure ragmail is installed and you have a venv. Then unpack the tarball,
+# Remote: make sure ragmail is installed and you have a venv. Then unpack the tarball,
 # and run the vectorize stage to create the embeddings, and package them up again.
 
 mkdir -p ~/tmp/ragmail && cd ~/tmp/ragmail
 tar -xzf /tmp/my-mail-clean.tar.gz
 
-# Make sure the right python venv is activated before running the pipeline
+# Remote: make sure the right python venv is activated before running the pipeline
 ragmail pipeline --workspace my-mail --stages vectorize
 tar -czvf /tmp/my-mail-embeddings.tar.gz workspaces/my-mail/embeddings
 
-# Back on the local machine, fetch the embeddings and unpack them
+# Local: fetch the embeddings and unpack them
 scp user@host:/tmp/my-mail-embeddings.tar.gz .
 tar -xvzf my-mail-embeddings.tar.gz -C workspaces/my-mail
 
