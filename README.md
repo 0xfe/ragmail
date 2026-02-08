@@ -53,7 +53,7 @@ cd ragmail
 # Build python and rust code
 just bootstrap
 
-# Activate the venv
+# Activate the ragmail venv
 source .venv/bin/activate
 ```
 
@@ -80,7 +80,7 @@ For example, you can quickly spin up an L4 instance on GCP for this purpose, whi
 ragmail pipeline ~/private/all-emails.mbox --workspace my-mail --stages split,preprocess
 
 # Local: zip up the preprocessed mail and send to remote host
-tar -czf my-mail-clean.tar.gz workspaces/my-mail/clean
+tar -czvf my-mail-clean.tar.gz workspaces/my-mail/clean
 scp my-mail-clean.tar.gz user@host:/tmp
 
 # On the remote host, make sure ragmail is installed and you have a venv. Then unpack the tarball,
@@ -88,14 +88,16 @@ scp my-mail-clean.tar.gz user@host:/tmp
 
 mkdir -p ~/tmp/ragmail && cd ~/tmp/ragmail
 tar -xzf /tmp/my-mail-clean.tar.gz
+
+# Make sure the right python venv is activated before running the pipeline
 ragmail pipeline --workspace my-mail --stages vectorize
-tar -czf /tmp/my-mail-embeddings.tar.gz workspaces/my-mail/embeddings
+tar -czvf /tmp/my-mail-embeddings.tar.gz workspaces/my-mail/embeddings
 
 # Back on the local machine, fetch the embeddings and unpack them
 scp user@host:/tmp/my-mail-embeddings.tar.gz .
-tar -xzf my-mail-embeddings.tar.gz -C workspaces/my-mail
+tar -xvzf my-mail-embeddings.tar.gz -C workspaces/my-mail
 
-# Local: ingest the embeddings
+# Local: ingest the embeddings (make sure your venv is activated)
 ragmail pipeline --workspace my-mail --stages ingest
 ```
 
