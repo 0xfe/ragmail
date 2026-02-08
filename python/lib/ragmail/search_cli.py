@@ -42,7 +42,10 @@ def _run_query_command(
         console.print("[red]Error:[/red] Database not found. Run 'ingest' first.")
         raise SystemExit(1)
 
-    with console.status("Loading..."):
+    if not console.is_terminal:
+        console.print("[dim]Loading...[/dim]")
+
+    def _load_engine() -> SearchEngine:
         database = Database(db_path)
         embedding_provider = create_embedding_provider(
             settings.embedding_provider,
@@ -74,14 +77,20 @@ def _run_query_command(
                     )
                 raise SystemExit(1) from exc
 
-        engine = SearchEngine(
+        return SearchEngine(
             repository,
             embedding_provider,
             llm_backend=llm_backend,
             use_llm_planner=use_llm_planner,
         )
 
-    if rag and llm_backend:
+    if console.is_terminal:
+        with console.status("Loading..."):
+            engine = _load_engine()
+    else:
+        engine = _load_engine()
+
+    if rag and engine.llm_backend:
         with console.status("[bold green]Generating answer..."):
             response = engine.search_with_rag(query, limit=limit)
     else:

@@ -2,13 +2,6 @@
 
 Purpose: compact AI handoff. Update whenever CLI contracts, stage ownership, workspace schema, or release tooling changes.
 
-Snapshot (2026-02-08)
-- Branch: `rust-migration`
-- Rust toolchain target: `1.93.0`
-- Python project root: `python/`
-- Public CLI entrypoint: Rust binary `ragmail` (`rust/ragmail-cli`)
-- Internal Python bridge binary: `ragmail-py` (script in dev env, PyInstaller in releases)
-
 ## Runtime ownership
 - Rust owns harness/orchestration and MBOX-heavy stages:
   - `split`
@@ -20,7 +13,8 @@ Snapshot (2026-02-08)
   - query/API/LLM commands (forwarded from Rust passthrough)
 
 ## Stage contract
-- Canonical stage order: `model,split,preprocess,vectorize,ingest`
+- Canonical default stage order: `split,preprocess,vectorize,ingest`
+- Optional warmup stage: `model` (runs only when explicitly selected)
 - Aliases accepted:
   - `download` -> `model`
   - `clean` -> `preprocess`
@@ -28,9 +22,8 @@ Snapshot (2026-02-08)
 - Invariant: `split/mbox_index.jsonl` is produced during `preprocess`; no standalone index stage in `ragmail pipeline`.
 - Runtime UX invariant:
   - Rust `pipeline` owns live terminal UI (header + staged live area + spinner + durations + summary).
-  - `model` stage displays `downloaded_bytes`/`cache_bytes` progress text (not `0/1` counters) with active status `downloading`.
   - `split` + `preprocess` now emit in-loop progress updates (not only per-file completion), so large single-file runs visibly advance.
-  - `model` progress now includes elapsed heartbeat for cache-hit runs where downloaded bytes stay flat.
+  - `model` progress text (`downloaded_bytes`/`cache_bytes`) is shown only when the optional `model` stage is selected.
   - `split`, `preprocess`, `vectorize`, and `ingest` use explicit `starting` status + startup text before first measurable progress callback.
   - Vectorize emits startup heartbeat progress while embedding provider initialization is in-flight.
 

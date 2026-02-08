@@ -12,15 +12,9 @@ Typical questions you can answer:
 - "_Explore my relationship with Alice and write me a doc on how it progressed, start to finish._"
 - "_How many times did Bob email me in February 2026?_"
 
-As you use this more and more, you'll find that you can uncover some really interesting insights from your email.
+As you use this more and more, you'll find that you can uncover some **really interesting insights** from your email. I have about 22 years of e-mail in Gmail, and another 10 years of it in my archives. I built this tool so I could do some local analysis on my email.
 
-I have about 22 years of e-mail in Gmail, and another 10 years of it my archives. I built this tool so I could do some local analysis on my email.
-
-### Privacy Note
-
-You have complete control over your data. During the pipline stage, no data leaves your machine by default. All vector embeddings are calculated and stored locally.
-
-When using the agent (or with `ragmail query`), what you share depends entirely on the tools and modles you use. For example, if you use OpenAI's Codex, you're sharing your queries and all relevant context with OpenAI. If you use OpenCode with a local LLM, you're not sharing anything.
+See the [privacy note](#privacy-note) below for how your data is handled.
 
 ## How it works
 
@@ -66,7 +60,7 @@ source .venv/bin/activate
 This is the simplest way to get started, but it will be slow if you have a large mailbox.
 
 ```bash
-# Run full pipeline (model,split,preprocess,vectorize,ingest)
+# Run full pipeline (split,preprocess,vectorize,ingest)
 ragmail pipeline ~/private/all-emails.mbox --workspace my-mail
 ```
 
@@ -140,6 +134,12 @@ Required:
 Optional for release maintainers:
 
 - `dpkg-deb` for Linux `.deb` packaging
+
+## Privacy Note
+
+You have complete control over your data. During the pipline stage, no data leaves your machine by default. All vector embeddings are calculated and stored locally.
+
+When using the agent (or with `ragmail query`), what you share depends entirely on the tools and modles you use. For example, if you use OpenAI's Codex, you're sharing your queries and all relevant context with OpenAI. If you use OpenCode with a local LLM, you're not sharing anything.
 
 ## Usage Instructions
 

@@ -85,16 +85,17 @@ def run_pipeline(
 
     inputs = [Path(p).resolve() for p in input_mboxes]
 
-    if stages is not None:
+    if stages is None:
+        # Default pipeline skips the explicit warmup stage; vectorize handles model/cache warmup.
+        stages = {"split", "preprocess", "vectorize", "ingest"}
+    else:
         stage_aliases = {"download": "model", "clean": "preprocess", "index": "preprocess"}
         stages = {stage_aliases.get(stage, stage) for stage in stages}
 
     def _selected(stage: str) -> bool:
-        return stages is None or stage in stages
+        return stage in stages
 
     def _refresh_selected() -> set[str]:
-        if stages is None:
-            return {"model", "split", "preprocess", "vectorize", "ingest"}
         return set(stages)
 
     if not inputs and _selected("split"):
@@ -119,7 +120,8 @@ def run_pipeline(
         refresh=refresh,
         cache_root=cache_root,
     )
-    stage_display = _StageDisplay(["model", "split", "preprocess", "vectorize", "ingest"])
+    ordered_stages = ["model", "split", "preprocess", "vectorize", "ingest"]
+    stage_display = _StageDisplay([stage for stage in ordered_stages if stage in stages])
     stage_display.render(force=True)
     stop_spinner = threading.Event()
     spinner_thread = threading.Thread(

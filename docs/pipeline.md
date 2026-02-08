@@ -10,17 +10,16 @@ Related post-ingest commands (`query`, `stats`, `message`, `serve`) are Python p
 They work from `ragmail`, even though they are not listed in `ragmail --help`.
 
 Default stage order:
-1. `model`
-2. `split`
-3. `preprocess`
-4. `vectorize`
-5. `ingest`
+1. `split`
+2. `preprocess`
+3. `vectorize`
+4. `ingest`
 
 ## Stage Summary
 
 | Stage | Runtime | Purpose | Primary outputs |
 |---|---|---|---|
-| `model` | Python | Warm model/cache dependencies | cache directories |
+| `model` (optional) | Python | Warm model/cache dependencies | cache directories |
 | `split` | Rust | Split MBOX by month with checkpoints | `split/YYYY-MM.mbox` |
 | `preprocess` | Rust | Parse + clean + filter noisy mail and build byte-offset index | `clean/*.clean.jsonl`, `spam/*.spam.jsonl`, `reports/*.summary`, `split/mbox_index.jsonl` |
 | `vectorize` | Python | Build embedding vectors from clean JSONL | `embeddings/*.embed.db` |
@@ -31,6 +30,7 @@ Default stage order:
 ## `model`
 This stage prepares dependencies and cache state.
 It makes later stages more predictable.
+It is optional and no longer part of the default pipeline run.
 
 Use it alone when you want to pre-warm a machine.
 

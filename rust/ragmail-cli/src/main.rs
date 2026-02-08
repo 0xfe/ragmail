@@ -627,8 +627,8 @@ enum Command {
         /// Optional base directory for workspaces (default: `workspaces`).
         #[arg(long, value_name = "DIR")]
         base_dir: Option<PathBuf>,
-        /// Comma-separated stage list (`model,split,preprocess,vectorize,ingest`).
-        #[arg(long, default_value = "model,split,preprocess,vectorize,ingest")]
+        /// Comma-separated stage list (`split,preprocess,vectorize,ingest`; optional `model`).
+        #[arg(long, default_value = "split,preprocess,vectorize,ingest")]
         stages: String,
         /// Resume from stage checkpoints where available.
         #[arg(long, default_value_t = true, action = ArgAction::Set)]
@@ -805,8 +805,12 @@ fn run_pipeline(options: &PipelineRunOptions<'_>) -> anyhow::Result<()> {
         options.refresh,
         &cache_root,
     );
-    let mut stage_display =
-        StageDisplay::new(&["model", "split", "preprocess", "vectorize", "ingest"]);
+    let display_stages: Vec<&str> = if wants_model {
+        vec!["model", "split", "preprocess", "vectorize", "ingest"]
+    } else {
+        vec!["split", "preprocess", "vectorize", "ingest"]
+    };
+    let mut stage_display = StageDisplay::new(display_stages.as_slice());
     stage_display.render(true);
     stage_display.start_spinner();
 

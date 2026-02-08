@@ -223,7 +223,11 @@ cli.add_command(serve)
 @click.option(
     "--stages",
     type=str,
-    help="Comma-separated stages to run (model,split,preprocess,vectorize,ingest). Default: all",
+    help=(
+        "Comma-separated stages to run "
+        "(split,preprocess,vectorize,ingest; optional model). "
+        "Default: split,preprocess,vectorize,ingest"
+    ),
 )
 @click.option(
     "--skip-exists-check",
@@ -257,7 +261,7 @@ def pipeline(
     skip_exists_check: bool,
     traceback: bool,
 ) -> None:
-    """Run model -> split -> preprocess -> vectorize -> ingest pipeline in a workspace."""
+    """Run split -> preprocess -> vectorize -> ingest pipeline in a workspace."""
     repair_embeddings = not no_repair_embeddings
     stage_set: set[str] | None = None
     if stages:
@@ -270,7 +274,7 @@ def pipeline(
         if invalid:
             raise click.ClickException(
                 f"Unknown stages: {', '.join(invalid)}. "
-                "Use model,split,preprocess,vectorize,ingest."
+                "Use split,preprocess,vectorize,ingest (or optional model)."
             )
         stage_set = {alias_map.get(part, part) for part in parts}
 
@@ -334,7 +338,7 @@ def _print_interrupt_summary(
 ) -> None:
     ws = get_workspace(workspace_name, base_dir=base_dir)
     state = ws.load_state()
-    selected = stages or {"model", "split", "preprocess", "vectorize", "ingest"}
+    selected = stages or {"split", "preprocess", "vectorize", "ingest"}
     print()
     print("Interrupted. Checkpoints saved where available.")
     print("Checkpoint status:")
