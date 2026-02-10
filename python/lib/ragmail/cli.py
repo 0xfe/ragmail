@@ -82,6 +82,7 @@ def query(
     base_dir: Path | None,
     cache_dir: Path | None,
 ) -> None:
+    click.echo("loading: resolving workspace and database", err=True)
     _apply_workspace_env(
         workspace_name,
         base_dir,
@@ -89,6 +90,7 @@ def query(
         args=list(ctx.args),
         set_db_env=True,
     )
+    click.echo("loading: launching search runtime", err=True)
     _run_module("ragmail.search_cli", ["query", *ctx.args])
 
 
@@ -106,6 +108,7 @@ def search(
     base_dir: Path | None,
     cache_dir: Path | None,
 ) -> None:
+    click.echo("loading: resolving workspace and database", err=True)
     _apply_workspace_env(
         workspace_name,
         base_dir,
@@ -113,6 +116,7 @@ def search(
         args=list(ctx.args),
         set_db_env=True,
     )
+    click.echo("loading: launching search runtime", err=True)
     _run_module("ragmail.search_cli", ["query", *ctx.args])
 
 

@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::mpsc;
@@ -366,9 +366,22 @@ pub(crate) fn run_python_passthrough(args: &[String]) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join(" ")
     );
-    let status = command
-        .status()
+    let query_like = is_query_like_passthrough(args);
+    if query_like {
+        eprintln!("loading: starting query command");
+        eprintln!("loading: resolving Python bridge runtime");
+        let _ = std::io::stderr().flush();
+    }
+
+    let mut child = command
+        .spawn()
         .with_context(|| format!("failed to execute python passthrough command: {rendered}"))?;
+    if query_like {
+        eprintln!("loading: Python bridge launched, waiting for search engine startup");
+        let _ = std::io::stderr().flush();
+    }
+    let status = child.wait()?;
+
     if status.success() {
         return Ok(());
     }
@@ -377,4 +390,21 @@ pub(crate) fn run_python_passthrough(args: &[String]) -> anyhow::Result<()> {
         status.code().unwrap_or(-1),
         rendered
     );
+}
+
+fn is_query_like_passthrough(args: &[String]) -> bool {
+    matches!(args.first().map(String::as_str), Some("query" | "search"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_query_like_passthrough;
+
+    #[test]
+    fn query_like_passthrough_detects_query_aliases() {
+        assert!(is_query_like_passthrough(&["query".to_string()]));
+        assert!(is_query_like_passthrough(&["search".to_string()]));
+        assert!(!is_query_like_passthrough(&["stats".to_string()]));
+        assert!(!is_query_like_passthrough(&[]));
+    }
 }
